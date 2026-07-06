@@ -36,12 +36,45 @@ def get_audit_logger():
         
     return _audit_chan
 
+_db_table_initialized = False
+
+def init_db_table():
+    global _db_table_initialized
+    db_enabled = os.getenv("SOAR_AUDIT_DB_ENABLED", "true").lower() == "true"
+    if not db_enabled:
+        return
+        
+    try:
+        import psycopg2
+        from config import DATABASE_URL
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS soar_audit_logs (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                    event_type VARCHAR(50) NOT NULL,
+                    incident_id VARCHAR(100) NOT NULL,
+                    details JSONB NOT NULL
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_audit_logs_event_type ON soar_audit_logs(event_type);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_audit_logs_incident_id ON soar_audit_logs(incident_id);")
+            conn.commit()
+        conn.close()
+        _db_table_initialized = True
+        logger.info("[AUDIT DB] Centralized PostgreSQL audit log table initialized successfully.")
+    except Exception as e:
+        logger.warning(f"[AUDIT DB] Centralized PostgreSQL storage initialization failed: {e}")
+
 class SoarAuditLogger:
     """Unified audit logging utility for tracking AI decisions, guardrail checks, and API connector responses."""
 
     @staticmethod
     def log_event(event_type: str, incident_id: str, payload: dict):
         """Logs an audit event to file, stdout, and Redis if available."""
+        global _db_table_initialized
+        
         audit_payload = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "eventType": event_type,
@@ -58,6 +91,28 @@ class SoarAuditLogger:
             
         # 2. Log to stdout with [AUDIT] prefix for log collectors (like Fluent Bit)
         print(f"[AUDIT] {log_str}", flush=True)
+
+        # 3. Log to centralized PostgreSQL database for post-mortem analysis
+        db_enabled = os.getenv("SOAR_AUDIT_DB_ENABLED", "true").lower() == "true"
+        if db_enabled:
+            if not _db_table_initialized:
+                init_db_table()
+            
+            # Re-verify initialization succeeded before inserting
+            if _db_table_initialized:
+                try:
+                    import psycopg2
+                    from config import DATABASE_URL
+                    conn = psycopg2.connect(DATABASE_URL)
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO soar_audit_logs (timestamp, event_type, incident_id, details) VALUES (%s, %s, %s, %s)",
+                            (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), event_type, incident_id, json.dumps(payload))
+                        )
+                        conn.commit()
+                    conn.close()
+                except Exception as dbe:
+                    logger.warning(f"[AUDIT DB ERROR] Failed to push audit log to database: {dbe}")
 
     @staticmethod
     def log_ai_decision(incident_id: str, input_prompt: str, raw_output: str, parsed_decision: dict):
