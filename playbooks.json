@@ -1,0 +1,182 @@
+{
+  "PB-WEB-EDGE": {
+    "playbook_id": "PB-WEB-EDGE",
+    "name": "Web Application Edge Exploit Playbook",
+    "steps": [
+      {
+        "step_id": "step-1-preserve",
+        "type": "action",
+        "action_type": "preserve_logs",
+        "target": "entities.hosts",
+        "loop": true,
+        "approval_mode": "AUTO",
+        "rationale": "Preserve web application and web server log states before containment."
+      },
+      {
+        "step_id": "step-2-risk-gate",
+        "type": "if_else",
+        "condition": "risk_score > 6.0",
+        "then_steps": [
+          {
+            "step_id": "step-3-parallel-containment",
+            "type": "parallel",
+            "parallel_steps": [
+              {
+                "step_id": "step-3a-block-ips",
+                "type": "action",
+                "action_type": "block_ip",
+                "target": "entities.ips",
+                "loop": true,
+                "approval_mode": "AUTO",
+                "rationale": "Block attacker IP address to halt active exploit traffic.",
+                "retry": {
+                  "max_attempts": 3,
+                  "delay_seconds": 2
+                },
+                "fallback_step": {
+                  "step_id": "step-3a-fallback-notify",
+                  "type": "action",
+                  "action_type": "notify_soc",
+                  "target": "soc_team",
+                  "loop": false,
+                  "approval_mode": "AUTO",
+                  "rationale": "IP block failed. Fallback triggered: Notify SOC immediately."
+                }
+              },
+              {
+                "step_id": "step-3b-quarantine-hosts",
+                "type": "action",
+                "action_type": "quarantine_host",
+                "target": "entities.hosts",
+                "loop": true,
+                "approval_mode": "APPROVAL_REQUIRED",
+                "rationale": "Quarantine compromised web server instances.",
+                "retry": {
+                  "max_attempts": 2,
+                  "delay_seconds": 3
+                },
+                "fallback_step": {
+                  "step_id": "step-3b-fallback-ticket",
+                  "type": "action",
+                  "action_type": "open_ticket",
+                  "target": "soc_team",
+                  "loop": false,
+                  "approval_mode": "AUTO",
+                  "rationale": "Host quarantine failed. Fallback triggered: Open emergency ticket."
+                }
+              }
+            ]
+          }
+        ],
+        "else_steps": [
+          {
+            "step_id": "step-4-notify-soc",
+            "type": "action",
+            "action_type": "notify_soc",
+            "target": "soc_team",
+            "loop": false,
+            "approval_mode": "AUTO",
+            "rationale": "Low risk web scanning, notify SOC analyst for review."
+          }
+        ]
+      }
+    ]
+  },
+  "PB-RANSOM-IMPACT": {
+    "playbook_id": "PB-RANSOM-IMPACT",
+    "name": "Ransomware Destructive Activity Playbook",
+    "steps": [
+      {
+        "step_id": "step-1-preserve",
+        "type": "action",
+        "action_type": "preserve_logs",
+        "target": "entities.hosts",
+        "loop": true,
+        "approval_mode": "AUTO",
+        "rationale": "Capture active process lists and memory metadata before isolation."
+      },
+      {
+        "step_id": "step-2-parallel-remediations",
+        "type": "parallel",
+        "parallel_steps": [
+          {
+            "step_id": "step-2a-logout-users",
+            "type": "action",
+            "action_type": "force_logout",
+            "target": "entities.users",
+            "loop": true,
+            "approval_mode": "AUTO",
+            "rationale": "Force logout user sessions to invalidate stolen credentials."
+          },
+          {
+            "step_id": "step-2b-quarantine-hosts",
+            "type": "action",
+            "action_type": "quarantine_host",
+            "target": "entities.hosts",
+            "loop": true,
+            "approval_mode": "APPROVAL_REQUIRED",
+            "rationale": "Quarantine server assets experiencing ransomware activity."
+          }
+        ]
+      },
+      {
+        "step_id": "step-3-threat-gate",
+        "type": "if_else",
+        "condition": "threat_confirmed == True",
+        "then_steps": [
+          {
+            "step_id": "step-3a-disable-accounts",
+            "type": "action",
+            "action_type": "disable_account",
+            "target": "entities.accounts_masked",
+            "loop": true,
+            "approval_mode": "AUTO",
+            "rationale": "Revoke credential privileges to lock out attacker domain access."
+          }
+        ],
+        "else_steps": []
+      }
+    ]
+  },
+  "PB-CRED": {
+    "playbook_id": "PB-CRED",
+    "name": "Privileged Credential Access Playbook",
+    "steps": [
+      {
+        "step_id": "step-1-force-logout",
+        "type": "action",
+        "action_type": "force_logout",
+        "target": "entities.users",
+        "loop": true,
+        "approval_mode": "AUTO",
+        "rationale": "Terminate active session tokens for compromised identity."
+      },
+      {
+        "step_id": "step-2-disable-accounts",
+        "type": "action",
+        "action_type": "disable_account",
+        "target": "entities.accounts_masked",
+        "loop": true,
+        "approval_mode": "AUTO",
+        "rationale": "Revoke account status to stop lateral credential abuse."
+      },
+      {
+        "step_id": "step-3-risk-gate",
+        "type": "if_else",
+        "condition": "risk_score >= 7.0",
+        "then_steps": [
+          {
+            "step_id": "step-3a-quarantine-hosts",
+            "type": "action",
+            "action_type": "quarantine_host",
+            "target": "entities.hosts",
+            "loop": true,
+            "approval_mode": "APPROVAL_REQUIRED",
+            "rationale": "Isolate high risk host where credential dumping occurred."
+          }
+        ],
+        "else_steps": []
+      }
+    ]
+  }
+}
