@@ -171,5 +171,52 @@ class TestPlaybookRunner(unittest.TestCase):
         self.assertEqual(actions[0]["fallback_step"]["action_type"], "notify_soc")
         self.assertEqual(actions[0]["fallback_step"]["target"], "soc_team")
 
+    def test_unsafe_conditions(self):
+        # We will add a playbook with an unsafe condition
+        self.test_playbooks["PB-TEST-UNSAFE"] = {
+            "playbook_id": "PB-TEST-UNSAFE",
+            "name": "Unsafe Condition Playbook",
+            "steps": [
+                {
+                    "step_id": "step-1",
+                    "type": "if_else",
+                    "condition": "risk_score > 5.0 and [x for x in ().__class__.__base__.__subclasses__() if x.__name__ == 'catch_warnings']",
+                    "then_steps": [
+                        {
+                            "step_id": "step-then",
+                            "type": "action",
+                            "action_type": "block_ip",
+                            "target": "1.1.1.1",
+                            "loop": False,
+                            "approval_mode": "AUTO"
+                        }
+                    ],
+                    "else_steps": [
+                        {
+                            "step_id": "step-else",
+                            "type": "action",
+                            "action_type": "notify_soc",
+                            "target": "soc_team",
+                            "loop": False,
+                            "approval_mode": "AUTO"
+                        }
+                    ]
+                }
+            ]
+        }
+        with open(self.filename, "w", encoding="utf-8") as f:
+            json.dump(self.test_playbooks, f)
+            
+        runner = PlaybookRunner(playbooks_path=self.filename)
+        context = {
+            "scoring": {
+                "final_risk_score_0_10": 9.0
+            }
+        }
+        actions = runner.execute_playbook("PB-TEST-UNSAFE", context)
+        # Should evaluate to False because of unsafe sanitization, running else branch (1 notify_soc action)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action_type"], "notify_soc")
+
 if __name__ == "__main__":
     unittest.main()

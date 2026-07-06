@@ -105,6 +105,17 @@ class PlaybookRunner:
             # Single action using joint targets
             resolved_actions.append(self._create_action_obj(action_type, ", ".join(targets), phase, approval_mode, rationale, retry, fallback_step))
 
+    def _is_safe_condition(self, condition: str) -> bool:
+        if not condition:
+            return False
+        # Block dangerous keywords, private properties, or introspection to prevent Sandbox escape
+        dangerous = ["__", "import", "eval", "exec", "getattr", "setattr", "globals", "locals", "sys", "os", "subprocess", "class", "base", "subclasses", "mro"]
+        lower_cond = condition.lower()
+        for word in dangerous:
+            if word in lower_cond:
+                return False
+        return True
+
     def _execute_if_else_step(self, step: dict, context: dict, resolved_actions: list):
         condition = step.get("condition")
         then_steps = step.get("then_steps", [])
@@ -116,13 +127,18 @@ class PlaybookRunner:
             "threat_confirmed": context.get("verified_case", {}).get("threat_confirmed", False)
         }
 
-        try:
-            # Safely evaluate condition using python eval
-            result = eval(condition, {"__builtins__": None}, eval_env)
-            logger.info(f"Evaluated condition '{condition}' -> {result}")
-        except Exception as e:
-            logger.error(f"Failed to evaluate condition '{condition}': {e}")
-            result = False
+        result = False
+        # Sanitize condition to prevent arbitrary code execution / sandbox escape
+        if not self._is_safe_condition(condition):
+            logger.error(f"[SECURITY ALERT] Unsafe condition string detected: {condition}. Skipping evaluation.")
+        else:
+            try:
+                # Safely evaluate condition using python eval
+                result = eval(condition, {"__builtins__": None}, eval_env)
+                logger.info(f"Evaluated condition '{condition}' -> {result}")
+            except Exception as e:
+                logger.error(f"Failed to evaluate condition '{condition}': {e}")
+                result = False
 
         if result:
             self._process_steps(then_steps, context, resolved_actions)
