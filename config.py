@@ -10,11 +10,11 @@ SOAR_QUEUED_ACTIONS_TOPIC = os.getenv("SOAR_QUEUED_ACTIONS_TOPIC", "soar.actions
 ACTION_EXECUTION_DELAY_SECONDS = float(os.getenv("ACTION_EXECUTION_DELAY_SECONDS", "2.0"))
 
 # Database Config
-DATABASE_URL = os.getenv("DATABASE_URL", "postgres://postgres:1@postgres:5432/aegis?sslmode=disable")
+DATABASE_URL = os.getenv("DATABASE_URL", "")  # I-01 fix: no hardcoded credentials fallback
 
 # Dashboard API Config
 DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://dashboard-backend:8082/api")
-AEGIS_INTERNAL_TOKEN = os.getenv("AEGIS_INTERNAL_TOKEN", "aegis-secret-security-sync-token-2026")
+AEGIS_INTERNAL_TOKEN = os.getenv("AEGIS_INTERNAL_TOKEN", "")  # I-01 fix: no hardcoded fallback
 
 # Qwen 3.7 Plus LLM Config
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")

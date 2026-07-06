@@ -37,7 +37,7 @@ class OpaPolicyEvaluator:
 
         # Initialize Asset Inventory sync configurations
         self.inventory_url = os.getenv("ASSET_INVENTORY_API_URL", "http://asset-inventory:8083/api/v1/assets/critical")
-        self.internal_token = os.getenv("AEGIS_INTERNAL_TOKEN", "aegis-secret-security-sync-token-2026")
+        self.internal_token = os.getenv("AEGIS_INTERNAL_TOKEN", "")  # I-01 fix: no hardcoded fallback
         
         # Initial sync from Asset Inventory
         self.sync_whitelist_from_inventory()
