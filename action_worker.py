@@ -3,7 +3,10 @@ import logging
 import time
 import uuid
 import requests
-import redis
+try:
+    import redis
+except ImportError:
+    redis = None
 from config import (
     KAFKA_BROKERS, SOAR_DECISIONS_TOPIC, SOAR_QUEUED_ACTIONS_TOPIC,
     DASHBOARD_EVENTS_TOPIC, ACTION_EXECUTION_DELAY_SECONDS, DASHBOARD_API_URL,
@@ -25,8 +28,12 @@ class SoarActionWorker:
         
         # Initialize Redis State Database connection
         try:
-            self.redis = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-            logger.info(f"Connected to Redis State Database at {REDIS_URL}")
+            if redis:
+                self.redis = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+                logger.info(f"Connected to Redis State Database at {REDIS_URL}")
+            else:
+                logger.warning("Redis client library not installed. Running without Redis state database.")
+                self.redis = None
         except Exception as re:
             logger.error(f"Failed to connect to Redis State Database: {re}")
             self.redis = None
@@ -84,6 +91,12 @@ class SoarActionWorker:
         except Exception as oepa:
             logger.error(f"Failed to initialize OPA Policy Evaluator: {oepa}")
             self.policy_evaluator = None
+
+        # Initialize Dry-run Mode configuration
+        import os
+        self.dry_run = os.getenv("SOAR_DRY_RUN", "false").lower() == "true"
+        if self.dry_run:
+            logger.info("[DRY RUN ACTIVE] SOAR Engine initialized in global dry-run simulation mode.")
         
     def start(self):
         logger.info("==================================================")
@@ -234,6 +247,10 @@ class SoarActionWorker:
                 elif phase == "contain" and should_execute_containment:
                     run_action = True
                 
+                is_dry_run = self.dry_run or decision.get("dry_run", False)
+                if is_dry_run:
+                    logger.info(f"[DRY RUN ACTIVE] Simulating action execution workflow for {action_type} on {target_value}")
+
                 if run_action:
                     # Check safety policies with Open Policy Agent (OPA)
                     if self.policy_evaluator:
@@ -256,125 +273,130 @@ class SoarActionWorker:
                             self.sync_execution_progress(decision, action, incident_id)
                             continue
 
-                    # Enforce Rate Limiting per target system
-                    target_system = None
-                    if action_type in ("block_ip", "block_domain"):
-                        target_system = "fortinet"
-                    elif action_type in ("disable_account", "reset_password"):
-                        target_system = "active_directory"
-                    elif action_type in ("quarantine_host", "lift_isolation"):
-                        target_system = "crowdstrike"
-                        
-                    if target_system and self.rate_limiter:
-                        logger.info(f"[RATE LIMITER] Acquiring token for {target_system}...")
-                        token_acquired = self.rate_limiter.acquire_token(target_system, timeout_seconds=15.0)
-                        if not token_acquired:
-                            logger.error(f"[RATE LIMITER EXCEEDED] Timeout acquiring token for {target_system}. Action will fail and trigger retry.")
-                            action["status"] = "failed"
-                            action["rationale"] = f"{action.get('rationale', '')} | Rate Limiter Timeout for {target_system}"
-                            
-                            if self.redis:
-                                redis_key = f"aegis:playbook:status:{incident_id}"
-                                self.redis.hincrby(redis_key, "failed_actions", 1)
-                            self.sync_execution_progress(decision, action, incident_id)
-                            continue
-
-                    # Trigger Fortinet Firewall API Connector if it's an IP/Domain block
-                    if self.fortinet:
-                        if action_type == "block_ip":
-                            fw_success, fw_msg = self.fortinet.block_ip(target_value)
-                            if fw_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block: {fw_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block Failed: {fw_msg}"
-                        elif action_type == "block_domain":
-                            fw_success, fw_msg = self.fortinet.block_domain(target_value)
-                            if fw_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block: {fw_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block Failed: {fw_msg}"
-
-                    # Trigger Active Directory / Entra ID API Connector if it's account management
-                    if self.ad:
-                        if action_type == "disable_account":
-                            ad_success, ad_msg = self.ad.disable_account(target_value)
-                            if ad_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | AD Action: {ad_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | AD Action Failed: {ad_msg}"
-                        elif action_type == "reset_password":
-                            ad_success, ad_msg = self.ad.reset_password(target_value)
-                            if ad_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | AD Action: {ad_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | AD Action Failed: {ad_msg}"
-
-                    # Trigger CrowdStrike EDR API Connector if it's host isolation
-                    if self.crowdstrike:
-                        if action_type == "quarantine_host":
-                            cs_success, cs_msg = self.crowdstrike.isolate_host(target_value)
-                            if cs_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation: {cs_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation Failed: {cs_msg}"
-                        elif action_type == "lift_isolation":
-                            cs_success, cs_msg = self.crowdstrike.lift_isolation(target_value)
-                            if cs_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation: {cs_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation Failed: {cs_msg}"
-
-                    # Trigger AWS WAF API Connector for IP/Domain containment & custom signatures
-                    if self.waf:
-                        if action_type == "block_ip":
-                            waf_success, waf_msg = self.waf.block_ip(target_value)
-                            if waf_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | AWS WAF: {waf_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Failed: {waf_msg}"
-                        elif action_type == "deploy_waf_rule":
-                            # Target value represents attack type (e.g. SQLi), rationale might contain the URL pattern
-                            url_pattern = action.get("target", {}).get("value_masked", "/")
-                            waf_success, waf_msg = self.waf.deploy_mitigation_rule(target_value, url_pattern)
-                            if waf_success:
-                                action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule: {waf_msg}"
-                            else:
-                                action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule Failed: {waf_msg}"
-
-                    dashboard_action_type = self.executor._map_action_type(action_type)
-                    
-                    # 1. Retry Loop
-                    max_attempts = action.get("retry", {}).get("max_attempts", 1)
-                    delay_seconds = action.get("retry", {}).get("delay_seconds", 2.0)
-                    success = False
-                    details = "No execution attempt made"
-                    
-                    for attempt in range(max_attempts):
-                        if attempt > 0:
-                            logger.info(f"[ACTION RETRY] Retrying {action_type} on {target_value} (Attempt {attempt+1}/{max_attempts}) in {delay_seconds}s...")
-                            time.sleep(delay_seconds)
-                            
-                        success, details = self.executor._call_dashboard_perform_action(
-                            actor="SOAR Action Worker",
-                            action_type=dashboard_action_type,
-                            target=target_value,
-                            message=action.get("rationale", "")
-                        )
-                        if success:
-                            break
-                    
-                    if success:
-                        action["status"] = "executed"
-                        logger.info(f"[ACTION EXECUTOR QUEUE] EXECUTED: {action_type} on {target_value} successfully.")
+                    if is_dry_run:
+                        logger.info(f"[DRY RUN SIMULATION] Action {action_type} on {target_value} passed OPA/Whitelist Guardrails. Bypassing execution.")
+                        action["status"] = "simulated"
+                        action["rationale"] = f"{action.get('rationale', '')} | [DRY RUN] Simulated execution successfully."
                     else:
-                        action["status"] = "failed"
-                        logger.error(f"[ACTION EXECUTOR QUEUE] FAILED after {max_attempts} attempts: {action_type} on {target_value}: {details}")
+                        # Enforce Rate Limiting per target system
+                        target_system = None
+                        if action_type in ("block_ip", "block_domain"):
+                            target_system = "fortinet"
+                        elif action_type in ("disable_account", "reset_password"):
+                            target_system = "active_directory"
+                        elif action_type in ("quarantine_host", "lift_isolation"):
+                            target_system = "crowdstrike"
+                            
+                        if target_system and self.rate_limiter:
+                            logger.info(f"[RATE LIMITER] Acquiring token for {target_system}...")
+                            token_acquired = self.rate_limiter.acquire_token(target_system, timeout_seconds=15.0)
+                            if not token_acquired:
+                                logger.error(f"[RATE LIMITER EXCEEDED] Timeout acquiring token for {target_system}. Action will fail and trigger retry.")
+                                action["status"] = "failed"
+                                action["rationale"] = f"{action.get('rationale', '')} | Rate Limiter Timeout for {target_system}"
+                                
+                                if self.redis:
+                                    redis_key = f"aegis:playbook:status:{incident_id}"
+                                    self.redis.hincrby(redis_key, "failed_actions", 1)
+                                self.sync_execution_progress(decision, action, incident_id)
+                                continue
+
+                        # Trigger Fortinet Firewall API Connector if it's an IP/Domain block
+                        if self.fortinet:
+                            if action_type == "block_ip":
+                                fw_success, fw_msg = self.fortinet.block_ip(target_value)
+                                if fw_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block: {fw_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block Failed: {fw_msg}"
+                            elif action_type == "block_domain":
+                                fw_success, fw_msg = self.fortinet.block_domain(target_value)
+                                if fw_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block: {fw_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block Failed: {fw_msg}"
+
+                        # Trigger Active Directory / Entra ID API Connector if it's account management
+                        if self.ad:
+                            if action_type == "disable_account":
+                                ad_success, ad_msg = self.ad.disable_account(target_value)
+                                if ad_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AD Action: {ad_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AD Action Failed: {ad_msg}"
+                            elif action_type == "reset_password":
+                                ad_success, ad_msg = self.ad.reset_password(target_value)
+                                if ad_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AD Action: {ad_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AD Action Failed: {ad_msg}"
+
+                        # Trigger CrowdStrike EDR API Connector if it's host isolation
+                        if self.crowdstrike:
+                            if action_type == "quarantine_host":
+                                cs_success, cs_msg = self.crowdstrike.isolate_host(target_value)
+                                if cs_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation: {cs_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation Failed: {cs_msg}"
+                            elif action_type == "lift_isolation":
+                                cs_success, cs_msg = self.crowdstrike.lift_isolation(target_value)
+                                if cs_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation: {cs_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation Failed: {cs_msg}"
+
+                        # Trigger AWS WAF API Connector for IP/Domain containment & custom signatures
+                        if self.waf:
+                            if action_type == "block_ip":
+                                waf_success, waf_msg = self.waf.block_ip(target_value)
+                                if waf_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AWS WAF: {waf_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Failed: {waf_msg}"
+                            elif action_type == "deploy_waf_rule":
+                                # Target value represents attack type (e.g. SQLi), rationale might contain the URL pattern
+                                url_pattern = action.get("target", {}).get("value_masked", "/")
+                                waf_success, waf_msg = self.waf.deploy_mitigation_rule(target_value, url_pattern)
+                                if waf_success:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule: {waf_msg}"
+                                else:
+                                    action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule Failed: {waf_msg}"
+
+                        dashboard_action_type = self.executor._map_action_type(action_type)
                         
-                        # 2. Trigger Fallback Action if defined
-                        fallback_step = action.get("fallback_step")
-                        if fallback_step:
-                            logger.warning(f"[ACTION FALLBACK] Triggering fallback step {fallback_step.get('step_id')} (Type: {fallback_step.get('action_type')})")
-                            self.execute_fallback_action(fallback_step, target_value, incident_id, decision)
+                        # 1. Retry Loop
+                        max_attempts = action.get("retry", {}).get("max_attempts", 1)
+                        delay_seconds = action.get("retry", {}).get("delay_seconds", 2.0)
+                        success = False
+                        details = "No execution attempt made"
+                        
+                        for attempt in range(max_attempts):
+                            if attempt > 0:
+                                logger.info(f"[ACTION RETRY] Retrying {action_type} on {target_value} (Attempt {attempt+1}/{max_attempts}) in {delay_seconds}s...")
+                                time.sleep(delay_seconds)
+                                
+                            success, details = self.executor._call_dashboard_perform_action(
+                                actor="SOAR Action Worker",
+                                action_type=dashboard_action_type,
+                                target=target_value,
+                                message=action.get("rationale", "")
+                            )
+                            if success:
+                                break
+                        
+                        if success:
+                            action["status"] = "executed"
+                            logger.info(f"[ACTION EXECUTOR QUEUE] EXECUTED: {action_type} on {target_value} successfully.")
+                        else:
+                            action["status"] = "failed"
+                            logger.error(f"[ACTION EXECUTOR QUEUE] FAILED after {max_attempts} attempts: {action_type} on {target_value}: {details}")
+                            
+                            # 2. Trigger Fallback Action if defined
+                            fallback_step = action.get("fallback_step")
+                            if fallback_step:
+                                logger.warning(f"[ACTION FALLBACK] Triggering fallback step {fallback_step.get('step_id')} (Type: {fallback_step.get('action_type')})")
+                                self.execute_fallback_action(fallback_step, target_value, incident_id, decision)
                 else:
                     action["status"] = "suggested"
                     logger.info(f"[ACTION EXECUTOR QUEUE] SKIPPED (Suggested Only): {action_type} on {target_value}.")
@@ -391,7 +413,7 @@ class SoarActionWorker:
                             self.redis.hset(redis_key, "actions_status", json.dumps(actions_status))
                         
                         # Increment counters
-                        if action["status"] == "executed":
+                        if action["status"] in ("executed", "simulated"):
                             self.redis.hincrby(redis_key, "executed_actions", 1)
                         elif action["status"] == "failed":
                             self.redis.hincrby(redis_key, "failed_actions", 1)
