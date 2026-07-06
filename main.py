@@ -49,6 +49,24 @@ class SoarEngineApp:
             logger.error(f"Failed to connect to Redis State Database: {re}")
             self.redis = None
 
+        # Initialize Fortinet Firewall Connector
+        try:
+            from connectors.fortinet import FortinetConnector
+            self.fortinet = FortinetConnector()
+            logger.info("Fortinet Firewall Connector initialized successfully.")
+        except Exception as fe:
+            logger.error(f"Failed to initialize Fortinet Firewall Connector: {fe}")
+            self.fortinet = None
+
+        # Initialize AWS WAF Connector
+        try:
+            from connectors.waf import WafConnector
+            self.waf = WafConnector()
+            logger.info("AWS WAF API Connector initialized successfully.")
+        except Exception as we:
+            logger.error(f"Failed to initialize AWS WAF Connector: {we}")
+            self.waf = None
+
     def start(self):
         logger.info("==================================================")
         logger.info("       AEGIS CORE SOAR ENGINE (LAYER 2)           ")
@@ -85,7 +103,7 @@ class SoarEngineApp:
                     L1_FINDINGS_TOPIC,
                     SOAR_FAST_PATH_TOPIC,
                     bootstrap_servers=KAFKA_BROKERS,
-                    group_id="aegis-soar-engine-group",
+                    group_id="aegis-soar-engine-group-v2",
                     auto_offset_reset="latest"
                 )
                 logger.info(f"Successfully subscribed to topics: {[L1_FINDINGS_TOPIC, SOAR_FAST_PATH_TOPIC]}")
@@ -130,6 +148,15 @@ class SoarEngineApp:
         source_ip = data.get("source_ip", "127.0.0.1")
         attack_type = data.get("attack_type", "UNKNOWN")
         recommended_action = data.get("recommended_action", "BLOCK_IP")
+
+        # 0. Trigger Firewall/WAF blocking directly if connector is active and action is BLOCK_IP
+        if recommended_action == "BLOCK_IP":
+            if self.fortinet:
+                fw_success, fw_msg = self.fortinet.block_ip(source_ip)
+                logger.info(f"[FAST-PATH] Fortinet block result for {source_ip}: success={fw_success}, msg={fw_msg}")
+            if self.waf:
+                waf_success, waf_msg = self.waf.block_ip(source_ip)
+                logger.info(f"[FAST-PATH] AWS WAF block result for {source_ip}: success={waf_success}, msg={waf_msg}")
 
         # 1. Execute block action directly via Dashboard API
         # Autopilot is considered ON for fast-path since they are obvious and confirmed at Nginx level
