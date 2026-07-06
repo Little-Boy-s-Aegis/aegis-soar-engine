@@ -1,0 +1,97 @@
+[
+  {
+    "attack_type": "DDoS HTTP Flood",
+    "topic": "soar.fast_path",
+    "payload": {
+      "source_ip": "185.220.101.5",
+      "attack_type": "DDOS_HTTP_FLOOD",
+      "recommended_action": "BLOCK_IP",
+      "payload_snippet": "GET /api/payments HTTP/1.1 - Rate: 1500 req/sec from single IP",
+      "facility": "APIGATEWAY",
+      "timestamp": "2026-07-06T12:00:01Z"
+    }
+  },
+  {
+    "attack_type": "SQL Injection (SQLi) Web Threat",
+    "topic": "soar.fast_path",
+    "payload": {
+      "source_ip": "198.51.100.99",
+      "attack_type": "SQL_INJECTION",
+      "recommended_action": "BLOCK_IP",
+      "payload_snippet": "POST /api/orders query=1' OR '1'='1' --",
+      "facility": "AWS_WAF",
+      "timestamp": "2026-07-06T12:00:05Z"
+    }
+  },
+  {
+    "attack_type": "SSH / AD Brute Force Attempt",
+    "topic": "soar.l1_findings",
+    "payload": {
+      "schema_version": "littleboy.soc.layer1.agent_finding.v4",
+      "timestamp": "2026-07-06T12:00:10Z",
+      "agent_id": "agent-win-ad-01",
+      "agent_name": "Active Directory Auditor Agent",
+      "agent_type": "active_directory",
+      "threat_detected": true,
+      "finding_type": "confirmed_threat",
+      "capec_id": "CAPEC-112",
+      "mitre_attack_id": "T1110.001",
+      "raw_evidence": "Multiple login failures detected for user admin. Total counts: 25. Service: AD Login.",
+      "safety": {
+        "prompt_injection_observed": false,
+        "evidence_masked": false
+      },
+      "entities": {
+        "ips": ["203.0.113.14"],
+        "users": ["corp\\finance_temp"]
+      }
+    }
+  },
+  {
+    "attack_type": "Ransomware Malware Activity",
+    "topic": "soar.l1_findings",
+    "payload": {
+      "schema_version": "littleboy.soc.layer1.agent_finding.v4",
+      "timestamp": "2026-07-06T12:00:15Z",
+      "agent_id": "agent-cs-edr-02",
+      "agent_name": "CrowdStrike EDR Sensor",
+      "agent_type": "edr",
+      "threat_detected": true,
+      "finding_type": "confirmed_threat",
+      "capec_id": "CAPEC-234",
+      "mitre_attack_id": "T1003.001",
+      "raw_evidence": "Mimikatz credential dumping tool executed in memory on DB-PROD-REPL. Process name: mimikatz.exe. File hash: a4ab5ef7dd15a4192932cf61492385dd7775672174dda1cbc99018e49038441d.",
+      "safety": {
+        "prompt_injection_observed": false,
+        "evidence_masked": false
+      },
+      "entities": {
+        "ips": ["192.168.1.105"],
+        "hosts": ["DB-PROD-REPL"]
+      }
+    }
+  },
+  {
+    "attack_type": "Sensitive Data Exfiltration",
+    "topic": "soar.l1_findings",
+    "payload": {
+      "schema_version": "littleboy.soc.layer1.agent_finding.v4",
+      "timestamp": "2026-07-06T12:00:20Z",
+      "agent_id": "agent-nids-03",
+      "agent_name": "Zeek Network Intrusion Detection",
+      "agent_type": "network_ids",
+      "threat_detected": true,
+      "finding_type": "confirmed_threat",
+      "capec_id": "CAPEC-212",
+      "mitre_attack_id": "T1048",
+      "raw_evidence": "Abnormal volume of outbound traffic detected. Bytes sent: 5420001000. Protocol: TCP/443 to external target.",
+      "safety": {
+        "prompt_injection_observed": false,
+        "evidence_masked": false
+      },
+      "entities": {
+        "ips": ["192.168.1.200", "198.51.100.80"]
+      }
+    }
+  }
+]
