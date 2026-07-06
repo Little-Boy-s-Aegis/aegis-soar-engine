@@ -267,6 +267,9 @@ class SoarActionWorker:
                             action["status"] = "failed"
                             action["rationale"] = f"{action.get('rationale', '')} | OPA Blocked: {reason}"
                             
+                            # Trigger P0 Emergency Alert
+                            self.trigger_p0_alert(incident_id, action, reason, decision)
+                            
                             if self.redis:
                                 redis_key = f"aegis:playbook:status:{incident_id}"
                                 self.redis.hincrby(redis_key, "failed_actions", 1)
@@ -520,6 +523,45 @@ class SoarActionWorker:
 
         except Exception as e:
             logger.error(f"Failed to sync execution progress: {e}")
+
+    def trigger_p0_alert(self, incident_id: str, action: dict, reason: str, decision: dict):
+        """Triggers a P0 Emergency Alert when a critical safety guardrail is violated."""
+        try:
+            event_uuid = str(uuid.uuid4())
+            
+            # To trigger 'critical' severity in the Go backend, status must be 'ALLOWED'
+            # as parsed by ingestSecurityEvent in kafka_consumer.go
+            event_payload = {
+                "eventId": event_uuid,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "attackType": "GUARDRAILS_VIOLATION",
+                "endpoint": "SOAR-Guardrails",
+                "status": "ALLOWED",
+                "clientIp": "127.0.0.1",
+                "description": f"P0 EMERGENCY: AI attempted unsafe action '{action.get('action_type')}' on protected target '{action.get('target', {}).get('value_masked')}'. Guardrails Blocked: {reason}",
+                "payload": json.dumps({
+                    "incident_id": incident_id,
+                    "action": action,
+                    "guardrail_reason": reason,
+                    "severity": "P0"
+                }),
+                "sourceService": "SOAR-Guardrails"
+            }
+            
+            if self.producer:
+                self.producer.send(DASHBOARD_EVENTS_TOPIC, event_payload)
+                self.producer.flush()
+                logger.warning(f"[P0 ALERT TRIGGERED] Security Event published to Kafka: {event_payload['description']}")
+            
+            # Also log a P0 Audit log in the dashboard audit trail
+            self.executor._call_dashboard_perform_action(
+                actor="SOAR Action Worker (Guardrails)",
+                action_type="Other Action",
+                target=action.get('target', {}).get('value_masked', "unknown"),
+                message=f"P0 EMERGENCY ALERT: Guardrail violation blocked. Reason: {reason}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to publish P0 Alert: {e}")
 
 if __name__ == "__main__":
     worker = SoarActionWorker()

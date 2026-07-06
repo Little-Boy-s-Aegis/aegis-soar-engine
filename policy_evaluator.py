@@ -17,6 +17,7 @@ class OpaPolicyEvaluator:
         if not os.path.isabs(whitelist_path):
             dir_path = os.path.dirname(os.path.realpath(__file__))
             whitelist_path = os.path.join(dir_path, whitelist_path)
+        self.whitelist_path = whitelist_path
 
         self.whitelist = {}
         try:
@@ -33,6 +34,18 @@ class OpaPolicyEvaluator:
             logger.info(f"[OPA EVALUATOR] Open Policy Agent is enabled. Server: {self.opa_url}")
         else:
             logger.info("[OPA EVALUATOR] Open Policy Agent is disabled. Running local safety rules.")
+
+        # Initialize Asset Inventory sync configurations
+        self.inventory_url = os.getenv("ASSET_INVENTORY_API_URL", "http://asset-inventory:8083/api/v1/assets/critical")
+        self.internal_token = os.getenv("AEGIS_INTERNAL_TOKEN", "aegis-secret-security-sync-token-2026")
+        
+        # Initial sync from Asset Inventory
+        self.sync_whitelist_from_inventory()
+
+        # Start periodic sync thread in background
+        import threading
+        self.sync_thread = threading.Thread(target=self._run_periodic_sync, daemon=True)
+        self.sync_thread.start()
 
     def is_whitelisted(self, target: str, action_type: str) -> bool:
         """Checks if a target is present in the static whitelist."""
@@ -111,3 +124,49 @@ class OpaPolicyEvaluator:
         except Exception as e:
             logger.error(f"[OPA EVALUATOR ERROR] Failed to connect to OPA: {e}. Falling back to local safety rules.")
             return evaluate_local()
+
+    def _run_periodic_sync(self):
+        """Runs the periodic asset inventory synchronization loop in background."""
+        import time
+        while True:
+            # Sync every 10 minutes (600 seconds)
+            time.sleep(600)
+            self.sync_whitelist_from_inventory()
+
+    def sync_whitelist_from_inventory(self):
+        """Fetches the latest critical assets list from Asset Inventory API and updates whitelist.json."""
+        if not self.inventory_url:
+            return
+            
+        logger.info(f"[ASSET SYNC] Fetching critical assets from {self.inventory_url}...")
+        headers = {
+            "Authorization": f"Bearer {self.internal_token}"
+        }
+        try:
+            res = requests.get(self.inventory_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                critical_assets = data.get("critical_assets", {})
+                
+                # Validate response structure
+                if "ips" in critical_assets or "hosts" in critical_assets or "domains" in critical_assets:
+                    # Update local whitelist structure
+                    self.whitelist = {
+                        "ips": list(set(critical_assets.get("ips", []))),
+                        "hosts": list(set(critical_assets.get("hosts", []))),
+                        "domains": list(set(critical_assets.get("domains", [])))
+                    }
+                    
+                    # Persist back to whitelist.json
+                    try:
+                        with open(self.whitelist_path, "w", encoding="utf-8") as f:
+                            json.dump(self.whitelist, f, indent=2)
+                        logger.info(f"[ASSET SYNC SUCCESS] Whitelist updated. Total: {len(self.whitelist['ips'])} IPs, {len(self.whitelist['hosts'])} Hosts, {len(self.whitelist['domains'])} Domains.")
+                    except Exception as we:
+                        logger.error(f"[ASSET SYNC] Failed to write updated whitelist to disk: {we}")
+                else:
+                    logger.warning("[ASSET SYNC] Received invalid response structure from Asset Inventory.")
+            else:
+                logger.warning(f"[ASSET SYNC] Asset Inventory API returned HTTP {res.status_code}. Using current whitelist.")
+        except Exception as e:
+            logger.warning(f"[ASSET SYNC WARNING] Failed to connect to Asset Inventory API: {e}. Using current whitelist.")

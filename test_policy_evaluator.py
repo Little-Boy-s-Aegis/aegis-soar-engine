@@ -1,11 +1,14 @@
 import unittest
 import os
+from unittest.mock import patch, MagicMock
 from policy_evaluator import OpaPolicyEvaluator
 
 class TestPolicyEvaluator(unittest.TestCase):
-    def test_local_safety_critical_ip_block(self):
-        # Disable OPA to test local fallback safety checks
+    def setUp(self):
+        os.environ["ASSET_INVENTORY_API_URL"] = ""
         os.environ["OPA_ENABLED"] = "false"
+
+    def test_local_safety_critical_ip_block(self):
         evaluator = OpaPolicyEvaluator()
         
         # 1. Critical IP blocking should be denied
@@ -126,5 +129,38 @@ class TestPolicyEvaluator(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("WHITELIST SECURITY VIOLATION", reason)
 
+    @patch('requests.get')
+    def test_asset_inventory_sync(self, mock_get):
+        # Prepare mock response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "critical_assets": {
+                "ips": ["10.99.99.99"],
+                "hosts": ["NEW-CORE-SERVER"],
+                "domains": ["newbank.internal"]
+            }
+        }
+        mock_get.return_value = mock_response
+
+        # Temporarily use a scratch file to prevent overwriting prod whitelist.json
+        scratch_whitelist = "whitelist_scratch.json"
+        
+        # Restore environment variable for this test
+        os.environ["ASSET_INVENTORY_API_URL"] = "http://asset-inventory:8083/api/v1/assets/critical"
+        
+        # Initialize evaluator pointing to scratch file
+        evaluator = OpaPolicyEvaluator(whitelist_path=scratch_whitelist)
+        
+        # Verify sync worked and updated scratch whitelist
+        self.assertIn("10.99.99.99", evaluator.whitelist.get("ips", []))
+        self.assertIn("NEW-CORE-SERVER", evaluator.whitelist.get("hosts", []))
+        self.assertIn("newbank.internal", evaluator.whitelist.get("domains", []))
+        
+        # Clean up scratch file
+        if os.path.exists(scratch_whitelist):
+            os.remove(scratch_whitelist)
+
 if __name__ == "__main__":
+    from unittest.mock import patch, MagicMock
     unittest.main()

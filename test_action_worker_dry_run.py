@@ -11,6 +11,8 @@ from action_worker import SoarActionWorker
 
 class TestActionWorkerDryRun(unittest.TestCase):
     def setUp(self):
+        # Disable Asset Inventory Sync in test runs to speed them up
+        os.environ["ASSET_INVENTORY_API_URL"] = ""
         # Reset environmental variables
         if "SOAR_DRY_RUN" in os.environ:
             del os.environ["SOAR_DRY_RUN"]
@@ -135,6 +137,41 @@ class TestActionWorkerDryRun(unittest.TestCase):
         
         self.assertFalse(allowed)
         self.assertIn("WHITELIST SECURITY VIOLATION", reason)
+
+    def test_p0_alert_triggering(self):
+        worker = SoarActionWorker()
+        worker.producer = MagicMock()
+        worker.executor = MagicMock()
+
+        # Target action blocked by Guardrails
+        action = {
+            "action_id": "act-p0",
+            "action_type": "block_ip",
+            "phase": "contain",
+            "approval_mode": "AUTO",
+            "target": {"value_masked": "10.0.0.1"}
+        }
+
+        # Manually trigger alert
+        worker.trigger_p0_alert(
+            incident_id="inc-p0-test",
+            action=action,
+            reason="WHITELIST SECURITY VIOLATION: Denied block_ip on protected resource: 10.0.0.1",
+            decision={}
+        )
+
+        # Verify Kafka producer received the publish call with P0 attributes
+        worker.producer.send.assert_called_once()
+        args, kwargs = worker.producer.send.call_args
+        topic = args[0]
+        payload = args[1]
+        
+        self.assertEqual(payload["status"], "ALLOWED")
+        self.assertEqual(payload["attackType"], "GUARDRAILS_VIOLATION")
+        self.assertIn("P0 EMERGENCY", payload["description"])
+        
+        # Verify Audit log was called on the dashboard API
+        worker.executor._call_dashboard_perform_action.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()
