@@ -110,8 +110,11 @@ class OpaPolicyEvaluator:
             }
         }
 
+        headers = {
+            "Authorization": f"Bearer {self.internal_token}"
+        }
         try:
-            res = requests.post(self.endpoint, json=payload, timeout=3)
+            res = requests.post(self.endpoint, json=payload, headers=headers, timeout=3)
             if res.status_code == 200:
                 result = res.json().get("result", {})
                 allowed = result.get("allow", False)
