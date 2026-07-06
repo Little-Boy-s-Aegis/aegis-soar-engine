@@ -146,3 +146,51 @@ class ActiveDirectoryConnector:
         except Exception as e:
             logger.error(f"[AD LDAP ERROR] LDAP password reset failed: {e}")
             return False, f"AD/Entra ID password reset failed: {str(e)}"
+
+    def enable_account(self, username: str) -> tuple:
+        """
+        Enables a user account in both Entra ID (Graph API) and on-premises AD (LDAP).
+        Returns (success, message).
+        """
+        logger.info(f"[ACTIVE DIRECTORY] Request to enable account: {username}")
+        
+        # 1. Entra ID / Microsoft Graph API logic
+        try:
+            token = self._get_entra_token()
+            if token == "mock-entra-token":
+                logger.info(f"[ENTRA ID-SIMULATION] Enabled user account {username} via Microsoft Graph API.")
+            else:
+                url = f"https://graph.microsoft.com/v1.0/users/{username}"
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                }
+                payload = {"accountEnabled": True}
+                res = requests.patch(url, headers=headers, json=payload, timeout=10)
+                if res.status_code not in (200, 204):
+                    return False, f"Failed to enable Entra ID account: HTTP {res.status_code} - {res.text}"
+        except Exception as e:
+            logger.error(f"[ENTRA ID ERROR] Graph API call failed: {e}")
+            
+        # 2. On-premises Active Directory via LDAP
+        try:
+            if self.ldap_password == "mock-ldap-password":
+                logger.info(f"[ON-PREM AD-SIMULATION] Enabled user account {username} in Active Directory (UserAccountControl: 512).")
+                return True, f"[SIMULATION] Account {username} enabled in AD/Entra ID."
+            else:
+                import ldap3
+                server = ldap3.Server(self.ldap_server, get_info=ldap3.ALL)
+                conn = ldap3.Connection(server, self.ldap_user, self.ldap_password, auto_bind=True)
+                
+                search_filter = f"(sAMAccountName={username})"
+                conn.search("DC=domain,DC=local", search_filter, attributes=["userAccountControl"])
+                if conn.entries:
+                    user_dn = conn.entries[0].entry_dn
+                    # 512 is NORMAL_ACCOUNT
+                    conn.modify(user_dn, {"userAccountControl": [(ldap3.MODIFY_REPLACE, [512])]})
+                    return True, f"Account {username} enabled in AD (DN: {user_dn})."
+                else:
+                    return False, f"User {username} not found in Active Directory LDAP."
+        except Exception as e:
+            logger.error(f"[AD LDAP ERROR] LDAP call failed: {e}")
+            return False, f"AD/Entra ID enable failed: {str(e)}"

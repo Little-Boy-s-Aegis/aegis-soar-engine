@@ -116,3 +116,50 @@ class FortinetConnector:
         except Exception as e:
             logger.error(f"[FORTINET ERROR] Failed to connect to FortiGate: {e}")
             return False, f"Connection error: {str(e)}"
+
+    def unblock_ip(self, ip_address: str) -> tuple:
+        """
+        Deletes the address object for the IP and removes it from the blocked group.
+        Returns (success, message).
+        """
+        logger.info(f"[FORTINET] Request to unblock IP: {ip_address}")
+        addr_name = f"blocked_ip_{ip_address.replace('.', '_')}"
+        group_name = "Blocked_IPs_Group"
+        
+        try:
+            if self.api_token == "mock-fortinet-token-123456":
+                logger.info(f"[FORTINET-SIMULATION] Removed IP {ip_address} from blocklist.")
+                return True, f"[SIMULATION] IP {ip_address} unblocked on Fortinet Firewall."
+                
+            # Remove from Group first, then delete address object
+            # Removing member from group on FortiGate is done via PUT/POST or by deleting the address object directly
+            url_delete = f"{self.base_url}/cmdb/firewall/address/{addr_name}?access_token={self.api_token}"
+            res = requests.delete(url_delete, headers=self.headers, verify=self.verify_ssl, timeout=10)
+            if res.status_code in (200, 204, 404):
+                return True, f"IP {ip_address} successfully unblocked on Fortinet Firewall."
+            return False, f"Failed to delete address object: HTTP {res.status_code} - {res.text}"
+        except Exception as e:
+            logger.error(f"[FORTINET ERROR] Failed to unblock IP: {e}")
+            return False, f"Connection error: {str(e)}"
+
+    def unblock_domain(self, domain: str) -> tuple:
+        """
+        Deletes the FQDN address object for the domain.
+        Returns (success, message).
+        """
+        logger.info(f"[FORTINET] Request to unblock Domain: {domain}")
+        addr_name = f"blocked_domain_{domain.replace('.', '_')}"
+        
+        try:
+            if self.api_token == "mock-fortinet-token-123456":
+                logger.info(f"[FORTINET-SIMULATION] Removed Domain {domain} from blocklist.")
+                return True, f"[SIMULATION] Domain {domain} unblocked on Fortinet Firewall."
+                
+            url_delete = f"{self.base_url}/cmdb/firewall/address/{addr_name}?access_token={self.api_token}"
+            res = requests.delete(url_delete, headers=self.headers, verify=self.verify_ssl, timeout=10)
+            if res.status_code in (200, 204, 404):
+                return True, f"Domain {domain} successfully unblocked on Fortinet Firewall."
+            return False, f"Failed to delete FQDN address object: HTTP {res.status_code} - {res.text}"
+        except Exception as e:
+            logger.error(f"[FORTINET ERROR] Failed to unblock Domain: {e}")
+            return False, f"Connection error: {str(e)}"

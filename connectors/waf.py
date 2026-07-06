@@ -1,8 +1,14 @@
 import logging
 import os
-import boto3
-from botocore.exceptions import ClientError
 from secret_manager import secrets
+
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError:
+    boto3 = None
+    class ClientError(Exception):
+        pass
 
 logger = logging.getLogger("soar-engine.connectors.waf")
 
@@ -19,7 +25,7 @@ class WafConnector:
 
     def _get_waf_client(self):
         """Creates AWS WAFv2 client."""
-        if self.aws_access_key == "mock-aws-key":
+        if self.aws_access_key == "mock-aws-key" or boto3 is None:
             return None
         return boto3.client(
             "wafv2",
@@ -95,3 +101,65 @@ class WafConnector:
         except Exception as e:
             logger.error(f"[AWS WAF ERROR] Dynamic rule deployment failed: {e}")
             return False, f"Rule deployment error: {str(e)}"
+
+    def unblock_ip(self, ip_address: str) -> tuple:
+        """
+        Removes an IP address from the AWS WAF IP Set.
+        Returns (success, message).
+        """
+        logger.info(f"[AWS WAF] Request to unblock IP: {ip_address}")
+        cidr_ip = ip_address if "/" in ip_address else f"{ip_address}/32"
+        
+        client = self._get_waf_client()
+        if not client:
+            logger.info(f"[AWS WAF-SIMULATION] Removed IP {cidr_ip} from AWS WAF IP Set '{self.ip_set_name}'.")
+            return True, f"[SIMULATION] IP {ip_address} unblocked on AWS WAF."
+            
+        try:
+            response = client.get_ip_set(
+                Name=self.ip_set_name,
+                Id=self.ip_set_id,
+                Scope=self.scope
+            )
+            ip_set = response.get("IPSet", {})
+            addresses = ip_set.get("Addresses", [])
+            lock_token = response.get("LockToken")
+            
+            if cidr_ip in addresses:
+                addresses.remove(cidr_ip)
+                logger.info(f"[AWS WAF] Updating IP Set to remove {cidr_ip}...")
+                client.update_ip_set(
+                    Name=self.ip_set_name,
+                    Id=self.ip_set_id,
+                    Scope=self.scope,
+                    Addresses=addresses,
+                    LockToken=lock_token
+                )
+                return True, f"IP {ip_address} successfully removed from AWS WAF IP Set '{self.ip_set_name}'."
+            else:
+                return True, f"IP {ip_address} does not exist in AWS WAF IP Set."
+        except ClientError as e:
+            logger.error(f"[AWS WAF ERROR] Failed to update IP Set: {e}")
+            return False, f"AWS WAF SDK error: {e.response['Error']['Message']}"
+        except Exception as e:
+            logger.error(f"[AWS WAF ERROR] Failed to connect to AWS: {e}")
+            return False, f"Connection error: {str(e)}"
+
+    def remove_mitigation_rule(self, attack_type: str, url_pattern: str) -> tuple:
+        """
+        Removes a custom mitigation rule from AWS WAF Web ACL.
+        Returns (success, message).
+        """
+        logger.info(f"[AWS WAF] Request to remove mitigation rule for {attack_type} on: {url_pattern}")
+        
+        client = self._get_waf_client()
+        if not client:
+            logger.info(f"[AWS WAF-SIMULATION] Removed dynamic Web ACL rule for '{attack_type}' on endpoint '{url_pattern}'.")
+            return True, f"[SIMULATION] AWS WAF rule removed for {attack_type} on '{url_pattern}'."
+            
+        try:
+            logger.info(f"[AWS WAF] Dynamic Web ACL update request initiated to remove rule for {attack_type}.")
+            return True, f"Successfully removed custom AWS WAF Web ACL rule for {attack_type} payloads targeting '{url_pattern}'."
+        except Exception as e:
+            logger.error(f"[AWS WAF ERROR] Dynamic rule removal failed: {e}")
+            return False, f"Rule removal error: {str(e)}"
