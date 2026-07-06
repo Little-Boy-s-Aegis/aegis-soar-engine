@@ -186,6 +186,11 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
                 # Strip markdown codeblocks if LLM returned them inside JSON or string format
                 if isinstance(decision_dict, str):
                     decision_dict = self._clean_json_string(decision_dict)
+
+                # Log AI Decision to audit trail
+                from audit_logger import SoarAuditLogger
+                incident_id = decision_dict.get("input_summary", {}).get("incident_id", f"INC-AI-{int(time.time())}")
+                SoarAuditLogger.log_ai_decision(incident_id, user_prompt, raw_response, decision_dict)
                 
                 # Resolve actions structurally via PlaybookRunner
                 activated_playbooks = decision_dict.get("playbook_routing", {}).get("activated_playbooks", [])

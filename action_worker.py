@@ -262,6 +262,11 @@ class SoarActionWorker:
                             approval_mode=approval_mode,
                             risk_score=risk_score
                         )
+                        
+                        # Log Guardrails Check to Audit Trail
+                        from audit_logger import SoarAuditLogger
+                        SoarAuditLogger.log_guardrail_check(incident_id, action, allowed, reason)
+                        
                         if not allowed:
                             logger.error(f"[OPA BLOCKED] Action {action_type} on {target_value} blocked by OPA: {reason}")
                             action["status"] = "failed"
@@ -312,12 +317,16 @@ class SoarActionWorker:
                                     action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block: {fw_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block Failed: {fw_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "fortinet", "block_ip", {"target": target_value}, fw_success, fw_msg)
                             elif action_type == "block_domain":
                                 fw_success, fw_msg = self.fortinet.block_domain(target_value)
                                 if fw_success:
                                     action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block: {fw_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | Fortinet Block Failed: {fw_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "fortinet", "block_domain", {"target": target_value}, fw_success, fw_msg)
 
                         # Trigger Active Directory / Entra ID API Connector if it's account management
                         if self.ad:
@@ -327,12 +336,16 @@ class SoarActionWorker:
                                     action["rationale"] = f"{action.get('rationale', '')} | AD Action: {ad_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | AD Action Failed: {ad_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "active_directory", "disable_account", {"target": target_value}, ad_success, ad_msg)
                             elif action_type == "reset_password":
                                 ad_success, ad_msg = self.ad.reset_password(target_value)
                                 if ad_success:
                                     action["rationale"] = f"{action.get('rationale', '')} | AD Action: {ad_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | AD Action Failed: {ad_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "active_directory", "reset_password", {"target": target_value}, ad_success, ad_msg)
 
                         # Trigger CrowdStrike EDR API Connector if it's host isolation
                         if self.crowdstrike:
@@ -342,12 +355,16 @@ class SoarActionWorker:
                                     action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation: {cs_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation Failed: {cs_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "crowdstrike", "quarantine_host", {"target": target_value}, cs_success, cs_msg)
                             elif action_type == "lift_isolation":
                                 cs_success, cs_msg = self.crowdstrike.lift_isolation(target_value)
                                 if cs_success:
                                     action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation: {cs_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | CrowdStrike Isolation Failed: {cs_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "crowdstrike", "lift_isolation", {"target": target_value}, cs_success, cs_msg)
 
                         # Trigger AWS WAF API Connector for IP/Domain containment & custom signatures
                         if self.waf:
@@ -357,6 +374,8 @@ class SoarActionWorker:
                                     action["rationale"] = f"{action.get('rationale', '')} | AWS WAF: {waf_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Failed: {waf_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "aws_waf", "block_ip", {"target": target_value}, waf_success, waf_msg)
                             elif action_type == "deploy_waf_rule":
                                 # Target value represents attack type (e.g. SQLi), rationale might contain the URL pattern
                                 url_pattern = action.get("target", {}).get("value_masked", "/")
@@ -365,6 +384,8 @@ class SoarActionWorker:
                                     action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule: {waf_msg}"
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule Failed: {waf_msg}"
+                                from audit_logger import SoarAuditLogger
+                                SoarAuditLogger.log_api_response(incident_id, "aws_waf", "deploy_waf_rule", {"target": target_value, "pattern": url_pattern}, waf_success, waf_msg)
 
                         dashboard_action_type = self.executor._map_action_type(action_type)
                         
@@ -384,6 +405,16 @@ class SoarActionWorker:
                                 action_type=dashboard_action_type,
                                 target=target_value,
                                 message=action.get("rationale", "")
+                            )
+                            # Log dashboard action call to audit trail
+                            from audit_logger import SoarAuditLogger
+                            SoarAuditLogger.log_api_response(
+                                incident_id=incident_id,
+                                target_system="dashboard_actions",
+                                action_type=dashboard_action_type,
+                                request_params={"target": target_value, "actor": "SOAR Action Worker"},
+                                success=success,
+                                response_msg=details
                             )
                             if success:
                                 break

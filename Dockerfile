@@ -21,6 +21,7 @@ COPY secret_manager.py .
 COPY rate_limiter.py .
 COPY policy_evaluator.py .
 COPY whitelist.json .
+COPY audit_logger.py .
 COPY connectors/ ./connectors/
 
 ENTRYPOINT ["python", "main.py"]
