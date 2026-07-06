@@ -75,6 +75,15 @@ class SoarActionWorker:
         except Exception as rle:
             logger.error(f"Failed to initialize Rate Limiter: {rle}")
             self.rate_limiter = None
+
+        # Initialize OPA Policy Evaluator
+        try:
+            from policy_evaluator import OpaPolicyEvaluator
+            self.policy_evaluator = OpaPolicyEvaluator()
+            logger.info("OPA Policy Evaluator client initialized successfully.")
+        except Exception as oepa:
+            logger.error(f"Failed to initialize OPA Policy Evaluator: {oepa}")
+            self.policy_evaluator = None
         
     def start(self):
         logger.info("==================================================")
@@ -226,6 +235,27 @@ class SoarActionWorker:
                     run_action = True
                 
                 if run_action:
+                    # Check safety policies with Open Policy Agent (OPA)
+                    if self.policy_evaluator:
+                        risk_score = decision.get("scoring", {}).get("final_risk_score_0_10", 0.0)
+                        allowed, reason = self.policy_evaluator.is_action_allowed(
+                            action_type=action_type,
+                            target=target_value,
+                            phase=phase,
+                            approval_mode=approval_mode,
+                            risk_score=risk_score
+                        )
+                        if not allowed:
+                            logger.error(f"[OPA BLOCKED] Action {action_type} on {target_value} blocked by OPA: {reason}")
+                            action["status"] = "failed"
+                            action["rationale"] = f"{action.get('rationale', '')} | OPA Blocked: {reason}"
+                            
+                            if self.redis:
+                                redis_key = f"aegis:playbook:status:{incident_id}"
+                                self.redis.hincrby(redis_key, "failed_actions", 1)
+                            self.sync_execution_progress(decision, action, incident_id)
+                            continue
+
                     # Enforce Rate Limiting per target system
                     target_system = None
                     if action_type in ("block_ip", "block_domain"):

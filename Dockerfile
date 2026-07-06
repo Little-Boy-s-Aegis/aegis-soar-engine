@@ -19,6 +19,7 @@ COPY playbook_runner.py .
 COPY playbooks.json .
 COPY secret_manager.py .
 COPY rate_limiter.py .
+COPY policy_evaluator.py .
 COPY connectors/ ./connectors/
 
 ENTRYPOINT ["python", "main.py"]
