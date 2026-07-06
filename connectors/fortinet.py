@@ -11,7 +11,13 @@ class FortinetConnector:
     def __init__(self):
         self.firewall_ip = os.getenv("FORTINET_FIREWALL_IP", "192.168.1.99")
         self.api_token = secrets.get_secret("FORTINET_API_TOKEN", "mock-fortinet-token-123456")
-        self.base_url = f"https://{self.firewall_ip}/api/v2"
+        
+        # Support base url override for sandbox/staging environment simulation
+        self.base_url = os.getenv("FORTINET_BASE_URL")
+        if not self.base_url:
+            proto = "http" if "localhost" in self.firewall_ip or "127.0.0.1" in self.firewall_ip else "https"
+            self.base_url = f"{proto}://{self.firewall_ip}/api/v2"
+            
         self.headers = {
             "Content-Type": "application/json"
         }

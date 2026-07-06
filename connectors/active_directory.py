@@ -21,10 +21,10 @@ class ActiveDirectoryConnector:
 
     def _get_entra_token(self) -> str:
         """Fetches Microsoft Graph API access token using Client Credentials flow."""
-        if self.client_secret == "mock-client-secret":
+        if self.client_secret == "mock-client-secret" and not os.getenv("ENTRA_TOKEN_URL"):
             return "mock-entra-token"
             
-        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        url = os.getenv("ENTRA_TOKEN_URL", f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token")
         payload = {
             "client_id": self.client_id,
             "scope": "https://graph.microsoft.com/.default",
@@ -46,11 +46,12 @@ class ActiveDirectoryConnector:
         # 1. Entra ID / Microsoft Graph API logic
         try:
             token = self._get_entra_token()
-            if token == "mock-entra-token":
+            if token == "mock-entra-token" and not os.getenv("ENTRA_GRAPH_URL"):
                 logger.info(f"[ENTRA ID-SIMULATION] Disabled user account {username} via Microsoft Graph API.")
             else:
                 # Disable via MS Graph API
-                url = f"https://graph.microsoft.com/v1.0/users/{username}"
+                graph_base = os.getenv("ENTRA_GRAPH_URL", "https://graph.microsoft.com")
+                url = f"{graph_base}/v1.0/users/{username}"
                 headers = {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json"
@@ -157,10 +158,11 @@ class ActiveDirectoryConnector:
         # 1. Entra ID / Microsoft Graph API logic
         try:
             token = self._get_entra_token()
-            if token == "mock-entra-token":
+            if token == "mock-entra-token" and not os.getenv("ENTRA_GRAPH_URL"):
                 logger.info(f"[ENTRA ID-SIMULATION] Enabled user account {username} via Microsoft Graph API.")
             else:
-                url = f"https://graph.microsoft.com/v1.0/users/{username}"
+                graph_base = os.getenv("ENTRA_GRAPH_URL", "https://graph.microsoft.com")
+                url = f"{graph_base}/v1.0/users/{username}"
                 headers = {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json"
