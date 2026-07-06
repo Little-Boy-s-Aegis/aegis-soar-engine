@@ -2,10 +2,36 @@ import os
 import json
 import logging
 import time
+import hashlib
 
 logger = logging.getLogger("soar-engine.audit-logger")
 
 _audit_chan = None
+_last_log_hash = None
+
+def get_last_log_hash():
+    global _last_log_hash
+    if _last_log_hash is not None:
+        return _last_log_hash
+    
+    # Try to read the last line of the log file to resume the hash chain
+    current_path = os.getenv("SOAR_AUDIT_LOG_PATH", "soar_audit.log")
+    if os.path.exists(current_path):
+        try:
+            with open(current_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                if lines:
+                    last_line = lines[-1].strip()
+                    if "AUDIT: " in last_line:
+                        json_str = last_line.split("AUDIT: ")[1].strip()
+                        payload = json.loads(json_str)
+                        _last_log_hash = payload.get("hash", "0" * 64)
+                        return _last_log_hash
+        except Exception:
+            pass
+            
+    _last_log_hash = "0" * 64
+    return _last_log_hash
 
 def get_audit_logger():
     global _audit_chan
@@ -55,9 +81,13 @@ def init_db_table():
                     timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
                     event_type VARCHAR(50) NOT NULL,
                     incident_id VARCHAR(100) NOT NULL,
-                    details JSONB NOT NULL
+                    details JSONB NOT NULL,
+                    hash CHAR(64),
+                    prev_hash CHAR(64)
                 );
             """)
+            cursor.execute("ALTER TABLE soar_audit_logs ADD COLUMN IF NOT EXISTS hash CHAR(64);")
+            cursor.execute("ALTER TABLE soar_audit_logs ADD COLUMN IF NOT EXISTS prev_hash CHAR(64);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_audit_logs_event_type ON soar_audit_logs(event_type);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_soar_audit_logs_incident_id ON soar_audit_logs(incident_id);")
             conn.commit()
@@ -72,16 +102,30 @@ class SoarAuditLogger:
 
     @staticmethod
     def log_event(event_type: str, incident_id: str, payload: dict):
-        """Logs an audit event to file, stdout, and Redis if available."""
-        global _db_table_initialized
+        """Logs an audit event to file, stdout, and Redis if available with cryptographic integrity chain."""
+        global _db_table_initialized, _last_log_hash
         
-        audit_payload = {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        prev_hash = get_last_log_hash()
+        
+        # Prepare deterministic payload structure for hashing
+        hash_payload = {
+            "timestamp": now_str,
             "eventType": event_type,
             "incidentId": incident_id,
-            "details": payload
+            "details": payload,
+            "prevHash": prev_hash
         }
         
+        # Ensure canonical (sorted keys) serialization
+        canonical_str = json.dumps(hash_payload, sort_keys=True)
+        current_hash = hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
+        
+        # Build complete signed payload
+        audit_payload = hash_payload.copy()
+        audit_payload["hash"] = current_hash
+        
+        _last_log_hash = current_hash
         log_str = json.dumps(audit_payload)
         
         # 1. Log to dedicated audit file
@@ -98,7 +142,6 @@ class SoarAuditLogger:
             if not _db_table_initialized:
                 init_db_table()
             
-            # Re-verify initialization succeeded before inserting
             if _db_table_initialized:
                 try:
                     import psycopg2
@@ -106,8 +149,8 @@ class SoarAuditLogger:
                     conn = psycopg2.connect(DATABASE_URL)
                     with conn.cursor() as cursor:
                         cursor.execute(
-                            "INSERT INTO soar_audit_logs (timestamp, event_type, incident_id, details) VALUES (%s, %s, %s, %s)",
-                            (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), event_type, incident_id, json.dumps(payload))
+                            "INSERT INTO soar_audit_logs (timestamp, event_type, incident_id, details, hash, prev_hash) VALUES (%s, %s, %s, %s, %s, %s)",
+                            (now_str, event_type, incident_id, json.dumps(payload), current_hash, prev_hash)
                         )
                         conn.commit()
                     conn.close()

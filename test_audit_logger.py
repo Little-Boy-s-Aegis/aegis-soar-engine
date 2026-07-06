@@ -141,12 +141,12 @@ class TestSoarAuditLogger(unittest.TestCase):
         # Assert table creation and indices creation query were executed
         # Check that CREATE TABLE and INSERT INTO were called
         mock_cursor.execute.assert_any_call(
-            "\n                CREATE TABLE IF NOT EXISTS soar_audit_logs (\n                    id SERIAL PRIMARY KEY,\n                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,\n                    event_type VARCHAR(50) NOT NULL,\n                    incident_id VARCHAR(100) NOT NULL,\n                    details JSONB NOT NULL\n                );\n            "
+            "\n                CREATE TABLE IF NOT EXISTS soar_audit_logs (\n                    id SERIAL PRIMARY KEY,\n                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,\n                    event_type VARCHAR(50) NOT NULL,\n                    incident_id VARCHAR(100) NOT NULL,\n                    details JSONB NOT NULL,\n                    hash CHAR(64),\n                    prev_hash CHAR(64)\n                );\n            "
         )
         
         # Verify database insert query
         mock_cursor.execute.assert_any_call(
-            "INSERT INTO soar_audit_logs (timestamp, event_type, incident_id, details) VALUES (%s, %s, %s, %s)",
+            "INSERT INTO soar_audit_logs (timestamp, event_type, incident_id, details, hash, prev_hash) VALUES (%s, %s, %s, %s, %s, %s)",
             unittest.mock.ANY
         )
         
