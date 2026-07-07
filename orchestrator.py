@@ -12,9 +12,11 @@ import re
 import time
 from datetime import datetime
 from openai import OpenAI
+import redis
 from config import (
     DASHSCOPE_API_KEY, QWEN_MODEL_NAME, QWEN_BASE_URL,
-    SYSTEM_PROMPT_PATH, RISK_SCORING_DIR, LLM_TIMEOUT_SECONDS, LLM_ENABLED
+    SYSTEM_PROMPT_PATH, RISK_SCORING_DIR, LLM_TIMEOUT_SECONDS, LLM_ENABLED,
+    REDIS_URL
 )
 from schema_validator import L2OrchestratorDecision
 
@@ -88,6 +90,53 @@ class RiskTableParser:
         return self.capec_scores.get(capec_id, {})
 
 
+class RiskScoreCalculator:
+    @staticmethod
+    def calculate_raw_risk(base_score: float, asset_criticality: str) -> tuple[float, float]:
+        multipliers = {
+            "high": 1.5,
+            "medium": 1.0,
+            "low": 0.8
+        }
+        mult = multipliers.get(str(asset_criticality).lower(), 1.0)
+        raw_risk = base_score * mult
+        return min(max(raw_risk, 0.0), 10.0), mult
+
+
+class IncidentStateMachine:
+    def __init__(self, redis_client=None):
+        self.redis = redis_client
+
+    def transition_incident(self, incident_id: str, to_state: str, details: str = ""):
+        allowed_states = ["NEW", "ANALYZED", "MITIGATED", "CONTAINED", "CLOSED"]
+        if to_state not in allowed_states:
+            logger.error(f"Invalid state transition target: {to_state}")
+            return None
+            
+        current_state = "NEW"
+        if self.redis:
+            try:
+                key = f"incident:{incident_id}:state"
+                current_state = self.redis.get(key) or "NEW"
+                self.redis.set(key, to_state)
+            except Exception as e:
+                logger.warning(f"Redis get/set failed: {e}")
+                
+        # Persist to database & file log via SoarAuditLogger
+        from audit_logger import SoarAuditLogger
+        try:
+            SoarAuditLogger.log_event("STATE_TRANSITION", incident_id, {
+                "from_state": current_state,
+                "to_state": to_state,
+                "details": details
+            })
+        except Exception as e:
+            logger.error(f"Failed to log state transition to audit trail: {e}")
+            
+        logger.info(f"Incident {incident_id} state transition: {current_state} -> {to_state} ({details})")
+        return to_state
+
+
 class SoarOrchestrator:
     """Invokes Qwen 3 Plus security agent using Layer 2 prompt engineering."""
 
@@ -118,6 +167,16 @@ class SoarOrchestrator:
         from playbook_runner import PlaybookRunner
         self.playbook_runner = PlaybookRunner()
 
+        # Initialize Redis State Database connection and state machine
+        try:
+            self.redis = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+            self.state_machine = IncidentStateMachine(self.redis)
+            logger.info("Connected to Redis State Database in Orchestrator.")
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis for state machine: {e}")
+            self.redis = None
+            self.state_machine = IncidentStateMachine(None)
+
     def run_orchestration(self, findings: list, verified_logs: list) -> dict:
         """
         Runs correlation, verifications lookup, and calls the Qwen Orchestrator.
@@ -129,6 +188,53 @@ class SoarOrchestrator:
         Returns:
             dict matching littleboy.soc.layer2.orchestrator_decision.v7
         """
+        # Determine incident ID
+        incident_id = None
+        for f in findings:
+            if f.get("incident_id"):
+                incident_id = f.get("incident_id")
+                break
+        if not incident_id:
+            incident_id = f"INC-AI-{int(time.time())}"
+
+        # Transition to NEW state
+        self.state_machine.transition_incident(incident_id, "NEW", "Incident received at Layer 2 SOAR Orchestrator")
+
+        # Determine primary threat parameters
+        has_threat = any(f.get("threat_detected", False) for f in findings)
+        primary_finding = findings[0] if findings else {}
+        primary_attack_id = primary_finding.get("mitre_attack_id", "")
+        primary_capec_id = primary_finding.get("capec_id", "")
+
+        # Base score lookup
+        base_score = 5.0
+        if primary_attack_id:
+            row = self.risk_kb.lookup_attack(primary_attack_id)
+            base_score = float(row.get("base_threat_score_0_10", 5.0))
+        elif primary_capec_id:
+            row = self.risk_kb.lookup_capec(primary_capec_id)
+            base_score = float(row.get("base_threat_score_0_10", 5.0))
+
+        # Determine asset criticality from verified logs
+        asset_crit = "medium"
+        for log in verified_logs:
+            crit = log.get("assetCritical") or log.get("asset_criticality")
+            if crit:
+                crit_lower = str(crit).lower()
+                if crit_lower in ["high", "medium", "low"]:
+                    if crit_lower == "high" or (crit_lower == "medium" and asset_crit == "low"):
+                        asset_crit = crit_lower
+
+        # Calculate raw risk & multiplier
+        raw_risk, mult = RiskScoreCalculator.calculate_raw_risk(base_score, asset_crit)
+
+        # Verification Status & Cap
+        verified = len(verified_logs) > 0
+        v_strength = "supported" if verified else "none"
+        risk_cap = 7.0 if verified else 5.5
+        final_score = min(raw_risk, risk_cap)
+        priority = "high" if final_score >= 7.0 else "medium"
+
         # 1. Lookup Offline Risk Scores for prompt enrichment
         enriched_risk_context = []
         for f in findings:
@@ -187,9 +293,22 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
                 if isinstance(decision_dict, str):
                     decision_dict = self._clean_json_string(decision_dict)
 
+                # Dynamically recalculate/verify risk scoring
+                scoring = decision_dict.get("scoring", {})
+                scoring["score_source"] = "soar_calculator"
+                scoring["base_threat_score_0_10"] = base_score
+                scoring["asset_criticality_multiplier"] = mult
+                scoring["raw_context_risk_0_10"] = raw_risk
+                scoring["risk_cap_applied"] = True
+                scoring["risk_cap_0_10"] = risk_cap
+                scoring["risk_cap_reason"] = f"Verification strength is {v_strength}"
+                scoring["final_risk_score_0_10"] = final_score
+                scoring["priority"] = priority
+                decision_dict["scoring"] = scoring
+
                 # Log AI Decision to audit trail
                 from audit_logger import SoarAuditLogger
-                incident_id = decision_dict.get("input_summary", {}).get("incident_id", f"INC-AI-{int(time.time())}")
+                incident_id = decision_dict.get("input_summary", {}).get("incident_id", incident_id)
                 SoarAuditLogger.log_ai_decision(incident_id, user_prompt, raw_response, decision_dict)
                 
                 # Resolve actions structurally via PlaybookRunner
@@ -209,13 +328,31 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
                 
                 # Validate output matches v7 schema using Pydantic
                 validated_decision = L2OrchestratorDecision(**decision_dict)
+                
+                # Transition state machine to ANALYZED, and CONTAINED if actions executed
+                has_executed = any(a.get("status") == "executed" for a in decision_dict.get("actions", []))
+                final_state = "CONTAINED" if has_executed else "ANALYZED"
+                self.state_machine.transition_incident(incident_id, final_state, f"Incident processed successfully. Final State: {final_state}")
+
                 return validated_decision.model_dump(by_alias=False, exclude_none=True)
 
             except Exception as e:
                 logger.error(f"Qwen L2 Orchestration failed or timed out: {e}. Triggering local fallback.")
-                return self._generate_fallback_decision(findings, verified_logs, f"Orchestrator failure: {str(e)}")
+                return self._generate_fallback_decision(
+                    findings, verified_logs, f"Orchestrator failure: {str(e)}",
+                    incident_id=incident_id, base_score=base_score, mult=mult,
+                    raw_risk=raw_risk, risk_cap=risk_cap, final_score=final_score,
+                    priority=priority, has_threat=has_threat, primary_attack_id=primary_attack_id,
+                    primary_capec_id=primary_capec_id
+                )
         else:
-            return self._generate_fallback_decision(findings, verified_logs, "LLM client disabled or api key missing")
+            return self._generate_fallback_decision(
+                findings, verified_logs, "LLM client disabled or api key missing",
+                incident_id=incident_id, base_score=base_score, mult=mult,
+                raw_risk=raw_risk, risk_cap=risk_cap, final_score=final_score,
+                priority=priority, has_threat=has_threat, primary_attack_id=primary_attack_id,
+                primary_capec_id=primary_capec_id
+            )
 
     def _clean_json_string(self, text: str) -> dict:
         # Strip markdown ```json ... ``` blocks
@@ -223,34 +360,65 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
         cleaned = re.sub(r"\s*```$", "", cleaned)
         return json.loads(cleaned.strip())
 
-    def _generate_fallback_decision(self, findings: list, verified_logs: list, error_reason: str) -> dict:
+    def _generate_fallback_decision(self, findings: list, verified_logs: list, error_reason: str,
+                                    incident_id: str = None, base_score: float = None, mult: float = None,
+                                    raw_risk: float = None, risk_cap: float = None, final_score: float = None,
+                                    priority: str = None, has_threat: bool = None, primary_attack_id: str = None,
+                                    primary_capec_id: str = None) -> dict:
         """Fallback to a safe Suggest-Only decision matching v7 schema when Qwen fails."""
         logger.info("Generating local fallback suggest-only decision.")
         
         timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         
         # Simple rule-based logic for fallback
-        has_threat = any(f.get("threat_detected", False) for f in findings)
+        if has_threat is None:
+            has_threat = any(f.get("threat_detected", False) for f in findings)
         primary_finding = findings[0] if findings else {}
-        primary_attack_id = primary_finding.get("mitre_attack_id", "T1059")
-        primary_capec_id = primary_finding.get("capec_id", "")
-        
-        # Base score lookup
-        base_score = 5.0
-        if primary_attack_id:
-            row = self.risk_kb.lookup_attack(primary_attack_id)
-            base_score = float(row.get("base_threat_score_0_10", 5.0))
-        elif primary_capec_id:
-            row = self.risk_kb.lookup_capec(primary_capec_id)
-            base_score = float(row.get("base_threat_score_0_10", 5.0))
+        if primary_attack_id is None:
+            primary_attack_id = primary_finding.get("mitre_attack_id", "T1059")
+        if primary_capec_id is None:
+            primary_capec_id = primary_finding.get("capec_id", "")
+        if incident_id is None:
+            incident_id = f"INC-FALLBACK-{int(time.time())}"
+            
+        # Determine asset criticality from verified logs
+        asset_crit = "medium"
+        for log in verified_logs:
+            crit = log.get("assetCritical") or log.get("asset_criticality")
+            if crit:
+                crit_lower = str(crit).lower()
+                if crit_lower in ["high", "medium", "low"]:
+                    if crit_lower == "high" or (crit_lower == "medium" and asset_crit == "low"):
+                        asset_crit = crit_lower
 
-        # Verification
+        if base_score is None:
+            base_score = 5.0
+            if primary_attack_id:
+                row = self.risk_kb.lookup_attack(primary_attack_id)
+                base_score = float(row.get("base_threat_score_0_10", 5.0))
+            elif primary_capec_id:
+                row = self.risk_kb.lookup_capec(primary_capec_id)
+                base_score = float(row.get("base_threat_score_0_10", 5.0))
+
+        if mult is None:
+            multipliers = {"high": 1.5, "medium": 1.0, "low": 0.8}
+            mult = multipliers.get(asset_crit, 1.0)
+            
+        if raw_risk is None:
+            raw_risk = min(max(base_score * mult, 0.0), 10.0)
+
         verified = len(verified_logs) > 0
         v_state = "confirmed" if (verified and has_threat) else "insufficient"
         v_strength = "supported" if verified else "none"
-        risk_cap = 7.0 if verified else 5.5
-        final_score = min(base_score, risk_cap)
-        priority = "high" if final_score >= 7.0 else "medium"
+        
+        if risk_cap is None:
+            risk_cap = 7.0 if verified else 5.5
+            
+        if final_score is None:
+            final_score = min(raw_risk, risk_cap)
+            
+        if priority is None:
+            priority = "high" if final_score >= 7.0 else "medium"
 
         # Determine the best fallback playbook and execute via PlaybookRunner
         fallback_playbook_id = "PB-WEB-EDGE"
@@ -296,6 +464,9 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
                     a["status"] = "executed"
                 else:
                     a["status"] = "queued_for_approval"
+
+        # Transition state machine to ANALYZED state
+        self.state_machine.transition_incident(incident_id, "ANALYZED", f"Fallback due to: {error_reason}")
 
         fallback_decision = {
             "schema_version": "littleboy.soc.layer2.orchestrator_decision.v7",

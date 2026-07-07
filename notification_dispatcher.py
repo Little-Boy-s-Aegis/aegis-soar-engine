@@ -29,7 +29,7 @@ logger = logging.getLogger("soar-engine.notification_dispatcher")
 # Configuration
 # ---------------------------------------------------------------------------
 NOTIFICATION_CHANNELS_ENABLED = os.getenv(
-    "NOTIFICATION_CHANNELS_ENABLED", "telegram,pagerduty,jira,email,mqtt,webhook"
+    "NOTIFICATION_CHANNELS_ENABLED", "telegram,pagerduty,jira,email,mqtt,webhook,slack"
 ).lower().split(",")
 
 
@@ -37,6 +37,32 @@ NOTIFICATION_CHANNELS_ENABLED = os.getenv(
 # Lightweight connector helpers
 # ============================================================================
 # Each connector follows the project convention of returning (bool, str).
+
+class _SlackConnector:
+    """Send messages via Slack Webhooks."""
+
+    def __init__(self):
+        self.webhook_url = secrets.get_secret("SLACK_WEBHOOK_URL", "mock-slack-webhook-url")
+        self._simulation = self.webhook_url == "mock-slack-webhook-url"
+
+    def send_message(self, text: str) -> tuple[bool, str]:
+        """Send a plain-text message to the configured Slack webhook."""
+        if self._simulation:
+            logger.info(f"[SLACK-SIMULATION] Message sent: {text[:120]}…")
+            return True, "[SIMULATION] Slack message sent."
+        try:
+            resp = requests.post(
+                self.webhook_url,
+                json={"text": text},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return True, "Slack message sent."
+            return False, f"Slack HTTP {resp.status_code}: {resp.text}"
+        except Exception as exc:
+            logger.error(f"[SLACK ERROR] {exc}")
+            return False, str(exc)
+
 
 class _TelegramConnector:
     """Send messages via Telegram Bot API."""
@@ -247,6 +273,7 @@ class NotificationDispatcher:
         self.email = _EmailConnector()
         self.mqtt = _MqttConnector()
         self.webhook = _WebhookConnector()
+        self.slack = _SlackConnector()
         self._enabled = set(ch.strip() for ch in NOTIFICATION_CHANNELS_ENABLED)
         logger.info(f"[NOTIFY] Dispatcher initialised. Enabled channels: {self._enabled}")
 
@@ -359,6 +386,13 @@ class NotificationDispatcher:
             channels_used.append("telegram")
             if not ok:
                 failures.append(f"telegram: {msg}")
+
+        # Slack – all severities
+        if self._is_enabled("slack"):
+            ok, msg = self._safe_dispatch("Slack", self.slack.send_message, message)
+            channels_used.append("slack")
+            if not ok:
+                failures.append(f"slack: {msg}")
 
         # JIRA – MEDIUM and above
         if severity in ("CRITICAL", "HIGH", "MEDIUM") and self._is_enabled("jira"):

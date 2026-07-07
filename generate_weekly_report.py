@@ -19,24 +19,102 @@ def generate_weekly_report(log_path="soar_audit.log", output_path=None):
         
     print(f"[*] Extracting audit logs from {start_date_str} to {date_str}...")
     
-    events = []
-    if os.path.exists(log_path):
+    # Try fetching from PostgreSQL database first
+    def fetch_database_events(seven_days_ago):
         try:
-            with open(log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    if "AUDIT: " not in line:
-                        continue
-                    try:
-                        json_str = line.split("AUDIT: ")[1].strip()
-                        payload = json.loads(json_str)
-                        ts_str = payload.get("timestamp")
-                        ts = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ")
-                        if ts >= seven_days_ago:
-                            events.append(payload)
-                    except Exception:
-                        pass
+            import psycopg2
+            
+            # Make sure we add local directory to path to load config
+            sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+            try:
+                from config import DATABASE_URL
+            except ImportError:
+                DATABASE_URL = None
+                
+            database_url = DATABASE_URL or os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/aegis")
+            
+            print(f"[*] Connecting to database to fetch weekly report data...")
+            conn = psycopg2.connect(database_url)
+            cur = conn.cursor()
+            
+            cur.execute("""
+                SELECT incident_id, created_at, risk_score, priority, activated_playbooks, actions_resolved, raw_decision
+                FROM decisions
+                WHERE created_at >= %s
+                ORDER BY created_at DESC
+            """, (seven_days_ago,))
+            
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            db_events = []
+            for r in rows:
+                inc_id, created_at, risk_score, priority, playbooks, actions, raw_decision = r
+                
+                # 1. AI_DECISION event
+                db_events.append({
+                    "timestamp": created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "eventType": "AI_DECISION",
+                    "incidentId": inc_id,
+                    "details": raw_decision
+                })
+                
+                # 2. API_CONNECTOR events
+                if actions:
+                    for act in actions:
+                        action_type = act.get("action_type")
+                        target = act.get("target", {}).get("value_masked", "Unknown")
+                        status = act.get("status", "suggested")
+                        
+                        sys_name = "Firewall"
+                        if action_type == "quarantine_host":
+                            sys_name = "EDR"
+                        elif action_type in ("force_logout", "disable_account"):
+                            sys_name = "ActiveDirectory"
+                        elif action_type in ("preserve_logs", "preserve_evidence"):
+                            sys_name = "LogCompliance"
+                        elif action_type in ("notify_soc", "open_ticket"):
+                            sys_name = "Ticketing"
+                            
+                        db_events.append({
+                            "timestamp": created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "eventType": "API_CONNECTOR",
+                            "incidentId": inc_id,
+                            "details": {
+                                "targetSystem": sys_name,
+                                "actionType": action_type,
+                                "requestParams": {"target": target},
+                                "success": status in ("executed", "queued_for_approval", "pending", "success"),
+                                "responseMessage": f"Action resolved with status {status}"
+                            }
+                        })
+            print(f"[+] Successfully fetched {len(db_events)} events from PostgreSQL database.")
+            return db_events
         except Exception as e:
-            print(f"[-] Error reading log file: {e}")
+            print(f"[-] Database query failed: {e}. Fallback to log file parsing.")
+            return None
+
+    events = fetch_database_events(seven_days_ago)
+    if events is None:
+        events = []
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if "AUDIT: " not in line:
+                            continue
+                        try:
+                            json_str = line.split("AUDIT: ")[1].strip()
+                            payload = json.loads(json_str)
+                            ts_str = payload.get("timestamp")
+                            ts = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ")
+                            if ts >= seven_days_ago:
+                                events.append(payload)
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[-] Error reading log file: {e}")
             
     # Calculate stats
     total_playbooks = len(set(e.get("incidentId") for e in events if e.get("eventType") == "AI_DECISION"))
