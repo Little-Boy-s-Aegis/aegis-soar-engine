@@ -7,6 +7,7 @@ try:
     import redis
 except ImportError:
     redis = None
+from kafka import KafkaConsumer, KafkaProducer
 from config import (
     KAFKA_BROKERS, SOAR_DECISIONS_TOPIC, SOAR_QUEUED_ACTIONS_TOPIC,
     DASHBOARD_EVENTS_TOPIC, ACTION_EXECUTION_DELAY_SECONDS, DASHBOARD_API_URL,
