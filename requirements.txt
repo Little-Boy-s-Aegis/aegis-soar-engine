@@ -4,4 +4,6 @@ pydantic>=2.7.0
 psycopg2-binary>=2.9.9
 requests>=2.31.0
 redis>=5.0.1
+paho-mqtt>=2.1.0
+APScheduler>=3.10.4
 
