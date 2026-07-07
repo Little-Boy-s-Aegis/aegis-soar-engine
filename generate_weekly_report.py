@@ -40,22 +40,14 @@ def generate_weekly_report(log_path="soar_audit.log", output_path=None):
             
     # Calculate stats
     total_playbooks = len(set(e.get("incidentId") for e in events if e.get("eventType") == "AI_DECISION"))
-    if total_playbooks == 0:
-        # Fallback values for demonstration if log file is empty
-        total_playbooks = 8
         
     action_events = [e for e in events if e.get("eventType") == "API_CONNECTOR"]
     
     success_count = sum(1 for e in action_events if e.get("details", {}).get("success") is True)
     failed_count = sum(1 for e in action_events if e.get("details", {}).get("success") is False)
-    
-    # Fallback simulation if zero
-    if success_count == 0 and failed_count == 0:
-        success_count = 14
-        failed_count = 1
         
     total_actions = success_count + failed_count
-    success_rate = (success_count / total_actions * 100.0) if total_actions > 0 else 100.0
+    success_rate = (success_count / total_actions * 100.0) if total_actions > 0 else 0.0
     
     # Run cryptographic log integrity verification
     integrity_ok = verify_file_integrity(log_path)
@@ -110,11 +102,7 @@ Below is the chronological log of all mitigation controls deployed to active inf
             
             report_content += f"| {ts} | {inc_id} | {sys_name} | {act_type} | `{target}` | {status} | {msg} |\n"
     else:
-        # Fallback entries for presentation/demo
-        report_content += f"| {date_str}T08:12:45Z | inc-2026-901 | fortinet | block_ip | `198.51.100.22` | SUCCESS | IP blocked at perimeter edge. |\n"
-        report_content += f"| {date_str}T08:12:47Z | inc-2026-901 | active_directory | disable_account | `corp\\finance_temp` | SUCCESS | Compromised user account disabled. |\n"
-        report_content += f"| {date_str}T10:45:12Z | inc-2026-902 | crowdstrike | quarantine_host | `DB-PROD-REPL` | SUCCESS | Host isolation triggered via EDR. |\n"
-        report_content += f"| {date_str}T11:02:18Z | inc-2026-903 | aws_waf | block_ip | `198.51.100.45/32` | SUCCESS | Block rule updated on Web ACL. |\n"
+        report_content += "| - | - | - | - | - | - | No automated containment actions logged in this period. |\n"
 
     report_content += """
 ---
