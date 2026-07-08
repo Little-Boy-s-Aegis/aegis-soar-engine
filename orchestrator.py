@@ -6,8 +6,11 @@ verifications and offline risk tables as context, and outputting validated L2 JS
 """
 
 import json
+import hashlib
 import logging
+import math
 import os
+import random
 import re
 import time
 from datetime import datetime
@@ -21,6 +24,14 @@ from config import (
 from schema_validator import L2OrchestratorDecision
 
 logger = logging.getLogger("soar-engine.orchestrator")
+
+
+def _stable_mock_embedding(text, size=1024):
+    seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+    rng = random.Random(seed)
+    vector = [rng.uniform(-1.0, 1.0) for _ in range(size)]
+    norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+    return [x / norm for x in vector]
 
 
 class RiskTableParser:
@@ -177,6 +188,54 @@ class SoarOrchestrator:
             self.redis = None
             self.state_machine = IncidentStateMachine(None)
 
+    def _query_vector_db_playbooks(self, text: str) -> str:
+        """Query Qdrant to get related playbooks for Layer 2 decision context."""
+        qdrant_url = os.getenv("QDRANT_URL", "http://qdrant:6333")
+        api_key = DASHSCOPE_API_KEY
+            
+        try:
+            import requests
+            vector = _stable_mock_embedding(text)
+            if api_key and not api_key.startswith("mock"):
+                url = f"{QWEN_BASE_URL}/embeddings"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": "text-embedding-v3",
+                    "input": text
+                }
+                resp = requests.post(url, json=payload, headers=headers, timeout=3)
+                if resp.status_code == 200:
+                    vector = resp.json()["data"][0]["embedding"]
+            
+            # Step 2: Query Qdrant
+            qdrant_search_url = f"{qdrant_url.rstrip('/')}/collections/l2_playbooks/points/search"
+            search_payload = {
+                "vector": vector,
+                "limit": 2,
+                "with_payload": True
+            }
+            search_resp = requests.post(qdrant_search_url, json=search_payload, timeout=3)
+            if search_resp.status_code != 200:
+                return ""
+                
+            results = search_resp.json().get("result", [])
+            if not results:
+                return ""
+                
+            context_blocks = []
+            for r in results:
+                payload = r.get("payload", {})
+                context_blocks.append(
+                    f"Playbook: {payload.get('playbook_id')} - {payload.get('name')}\n"
+                    f"Steps:\n{json.dumps(payload.get('steps'), indent=2)}"
+                )
+            return "\n\n4. **Relevant Playbooks from Vector DB**:\n" + "\n\n".join(context_blocks)
+        except Exception:
+            return ""
+
     def run_orchestration(self, findings: list, verified_logs: list) -> dict:
         """
         Runs correlation, verifications lookup, and calls the Qwen Orchestrator.
@@ -252,6 +311,10 @@ class SoarOrchestrator:
 
         risk_context_str = "\n\n".join(enriched_risk_context)
 
+        # 1.5. Query Vector DB for relevant Playbooks
+        query_text = f"mitre_attack_id: {primary_attack_id}, capec_id: {primary_capec_id}, evidence: {primary_finding.get('raw_evidence', '')}"
+        playbook_context = self._query_vector_db_playbooks(query_text)
+
         # 2. Build User Prompt
         user_prompt = f"""
 ### INPUTS FOR LAYER 2 DECISION ENGINE
@@ -264,6 +327,7 @@ class SoarOrchestrator:
 
 3. **Authoritative Offline Risk Scoring References**:
 {risk_context_str}
+{playbook_context}
 
 Please correlate the findings, verify the logs, look up the base threat scores, calculate final risk scores, apply red-line security policies, and output a valid JSON decision conforming to schema version `littleboy.soc.layer2.orchestrator_decision.v7`.
 """
