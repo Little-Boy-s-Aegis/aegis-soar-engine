@@ -13,6 +13,7 @@ import os
 import random
 import re
 import time
+from urllib.parse import urlparse
 from datetime import datetime
 from openai import OpenAI
 import redis
@@ -32,6 +33,34 @@ def _stable_mock_embedding(text, size=1024):
     vector = [rng.uniform(-1.0, 1.0) for _ in range(size)]
     norm = math.sqrt(sum(x * x for x in vector)) or 1.0
     return [x / norm for x in vector]
+
+
+def _vector_db_provider():
+    provider = os.getenv("VECTOR_DB_PROVIDER", "").strip().lower()
+    if provider:
+        return provider
+    if os.getenv("OPENSEARCH_ENDPOINT", "").strip():
+        return "opensearch"
+    return "qdrant"
+
+
+def _aws_signed_request(method, url, body=None, service=None, timeout=3):
+    import requests
+    from botocore.auth import SigV4Auth
+    from botocore.awsrequest import AWSRequest
+    from botocore.session import Session
+
+    payload = json.dumps(body) if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    request = AWSRequest(method=method, url=url, data=payload, headers=headers)
+    region = os.getenv("AWS_REGION", "us-east-1")
+    parsed = urlparse(url)
+    inferred_service = "aoss" if ".aoss." in parsed.netloc else "es"
+    credentials = Session().get_credentials()
+    if credentials is None:
+        raise RuntimeError("AWS credentials are not available for OpenSearch request signing")
+    SigV4Auth(credentials.get_frozen_credentials(), service or os.getenv("OPENSEARCH_SERVICE", inferred_service), region).add_auth(request)
+    return requests.request(method, url, data=payload, headers=dict(request.headers), timeout=timeout)
 
 
 class RiskTableParser:
@@ -190,7 +219,12 @@ class SoarOrchestrator:
 
     def _query_vector_db_playbooks(self, text: str) -> str:
         """Query Qdrant to get related playbooks for Layer 2 decision context."""
+        provider = _vector_db_provider()
+        if provider == "disabled":
+            return ""
+
         qdrant_url = os.getenv("QDRANT_URL", "http://qdrant:6333")
+        opensearch_endpoint = os.getenv("OPENSEARCH_ENDPOINT", "").rstrip("/")
         api_key = DASHSCOPE_API_KEY
             
         try:
@@ -209,19 +243,47 @@ class SoarOrchestrator:
                 resp = requests.post(url, json=payload, headers=headers, timeout=3)
                 if resp.status_code == 200:
                     vector = resp.json()["data"][0]["embedding"]
+
+            if provider == "opensearch":
+                if not opensearch_endpoint:
+                    return ""
+                index_name = os.getenv("OPENSEARCH_L2_INDEX", "l2-playbooks")
+                search_payload = {
+                    "size": 2,
+                    "query": {
+                        "knn": {
+                            "embedding": {
+                                "vector": vector,
+                                "k": 2
+                            }
+                        }
+                    },
+                    "_source": True
+                }
+                search_resp = _aws_signed_request(
+                    "POST",
+                    f"{opensearch_endpoint}/{index_name}/_search",
+                    body=search_payload,
+                    timeout=3,
+                )
+                if search_resp.status_code not in (200, 201):
+                    return ""
+                hits = search_resp.json().get("hits", {}).get("hits", [])
+                results = [{"payload": hit.get("_source", {}).get("payload", hit.get("_source", {}))} for hit in hits]
+            else:
+                if not qdrant_url:
+                    return ""
+                qdrant_search_url = f"{qdrant_url.rstrip('/')}/collections/l2_playbooks/points/search"
+                search_payload = {
+                    "vector": vector,
+                    "limit": 2,
+                    "with_payload": True
+                }
+                search_resp = requests.post(qdrant_search_url, json=search_payload, timeout=3)
+                if search_resp.status_code != 200:
+                    return ""
+                results = search_resp.json().get("result", [])
             
-            # Step 2: Query Qdrant
-            qdrant_search_url = f"{qdrant_url.rstrip('/')}/collections/l2_playbooks/points/search"
-            search_payload = {
-                "vector": vector,
-                "limit": 2,
-                "with_payload": True
-            }
-            search_resp = requests.post(qdrant_search_url, json=search_payload, timeout=3)
-            if search_resp.status_code != 200:
-                return ""
-                
-            results = search_resp.json().get("result", [])
             if not results:
                 return ""
                 

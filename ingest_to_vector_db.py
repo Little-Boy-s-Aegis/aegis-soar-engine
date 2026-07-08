@@ -6,11 +6,16 @@ import random
 import math
 import logging
 import requests
+from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ingest-vector-db")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+OPENSEARCH_ENDPOINT = os.getenv("OPENSEARCH_ENDPOINT", "").rstrip("/")
+OPENSEARCH_L1_INDEX = os.getenv("OPENSEARCH_L1_INDEX", "l1-threat-intel")
+OPENSEARCH_L2_INDEX = os.getenv("OPENSEARCH_L2_INDEX", "l2-playbooks")
+VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "").strip().lower()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
 
@@ -22,6 +27,33 @@ PLAYBOOKS_JSON_PATH = os.path.join(SCRIPT_DIR, "playbooks.json")
 def qdrant_api(path):
     """Build Qdrant REST URLs without assuming a versioned API prefix."""
     return f"{QDRANT_URL.rstrip('/')}{path}"
+
+def vector_db_provider():
+    if VECTOR_DB_PROVIDER:
+        return VECTOR_DB_PROVIDER
+    if OPENSEARCH_ENDPOINT:
+        return "opensearch"
+    return "qdrant"
+
+def opensearch_api(path):
+    return f"{OPENSEARCH_ENDPOINT}{path}"
+
+def aws_signed_request(method, url, body=None, service=None, timeout=10):
+    from botocore.auth import SigV4Auth
+    from botocore.awsrequest import AWSRequest
+    from botocore.session import Session
+
+    payload = json.dumps(body) if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    request = AWSRequest(method=method, url=url, data=payload, headers=headers)
+    region = os.getenv("AWS_REGION", "us-east-1")
+    parsed = urlparse(url)
+    inferred_service = "aoss" if ".aoss." in parsed.netloc else "es"
+    credentials = Session().get_credentials()
+    if credentials is None:
+        raise RuntimeError("AWS credentials are not available for OpenSearch request signing")
+    SigV4Auth(credentials.get_frozen_credentials(), service or os.getenv("OPENSEARCH_SERVICE", inferred_service), region).add_auth(request)
+    return requests.request(method, url, data=payload, headers=dict(request.headers), timeout=timeout)
 
 def stable_text_seed(text):
     digest = hashlib.sha256(text.encode("utf-8")).digest()
@@ -84,9 +116,96 @@ def ensure_collection(collection_name):
         logger.error(f"Failed to create collection '{collection_name}' in Qdrant: {e}")
         return False
 
+def ensure_opensearch_index(index_name):
+    if not OPENSEARCH_ENDPOINT:
+        logger.error("OPENSEARCH_ENDPOINT is required when VECTOR_DB_PROVIDER=opensearch")
+        return False
+
+    url = opensearch_api(f"/{index_name}")
+    try:
+        resp = aws_signed_request("GET", url, timeout=10)
+        if resp.status_code == 200:
+            logger.info(f"OpenSearch index '{index_name}' already exists.")
+            return True
+    except Exception as e:
+        logger.warning(f"Error checking OpenSearch index '{index_name}': {e}. Continuing to creation.")
+
+    create_payload = {
+        "settings": {
+            "index": {
+                "knn": True
+            }
+        },
+        "mappings": {
+            "properties": {
+                "embedding": {
+                    "type": "knn_vector",
+                    "dimension": 1024
+                },
+                "payload": {
+                    "type": "object",
+                    "enabled": True
+                }
+            }
+        }
+    }
+    try:
+        resp = aws_signed_request("PUT", url, body=create_payload, timeout=10)
+        if resp.status_code in (200, 201):
+            logger.info(f"Created OpenSearch index '{index_name}' successfully.")
+            return True
+        if resp.status_code == 400 and "resource_already_exists_exception" in resp.text:
+            logger.info(f"OpenSearch index '{index_name}' already exists.")
+            return True
+        logger.error(f"Failed to create OpenSearch index '{index_name}': {resp.status_code} {resp.text[:500]}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to create OpenSearch index '{index_name}': {e}")
+        return False
+
+def upload_opensearch_points(index_name, points, batch_size=50):
+    for i in range(0, len(points), batch_size):
+        batch = points[i:i + batch_size]
+        lines = []
+        for point in batch:
+            lines.append(json.dumps({"index": {"_index": index_name, "_id": str(point["id"])}}))
+            lines.append(json.dumps({
+                "embedding": point["vector"],
+                "payload": point["payload"],
+            }))
+        body = "\n".join(lines) + "\n"
+        url = opensearch_api("/_bulk")
+        try:
+            # Re-sign with newline-delimited JSON instead of standard JSON.
+            from botocore.auth import SigV4Auth
+            from botocore.awsrequest import AWSRequest
+            from botocore.session import Session
+
+            headers = {"Content-Type": "application/x-ndjson"}
+            request = AWSRequest(method="POST", url=url, data=body, headers=headers)
+            region = os.getenv("AWS_REGION", "us-east-1")
+            parsed = urlparse(url)
+            inferred_service = "aoss" if ".aoss." in parsed.netloc else "es"
+            credentials = Session().get_credentials()
+            if credentials is None:
+                raise RuntimeError("AWS credentials are not available for OpenSearch request signing")
+            SigV4Auth(credentials.get_frozen_credentials(), os.getenv("OPENSEARCH_SERVICE", inferred_service), region).add_auth(request)
+            resp = requests.post(url, data=body, headers=dict(request.headers), timeout=20)
+            resp.raise_for_status()
+            if resp.json().get("errors"):
+                logger.error(f"OpenSearch bulk upload for '{index_name}' batch {i//batch_size + 1} returned item errors.")
+            else:
+                logger.info(f"Uploaded OpenSearch batch {i//batch_size + 1} to '{index_name}': {len(batch)} points.")
+        except Exception as e:
+            logger.error(f"Failed to upload OpenSearch batch {i//batch_size + 1} to '{index_name}': {e}")
+
 def ingest_l1_threat_intel():
     """Ingests L1 CAPEC and MITRE ATT&CK reference data into Qdrant."""
-    if not ensure_collection("l1_threat_intel"):
+    provider = vector_db_provider()
+    if provider == "opensearch":
+        if not ensure_opensearch_index(OPENSEARCH_L1_INDEX):
+            return
+    elif not ensure_collection("l1_threat_intel"):
         return
 
     points = []
@@ -160,8 +279,13 @@ def ingest_l1_threat_intel():
     else:
         logger.warning(f"L1 Attack Vectors CSV path not found: {attack_csv}")
 
-    # Upload in batches to Qdrant
     if points:
+        if provider == "opensearch":
+            upload_opensearch_points(OPENSEARCH_L1_INDEX, points)
+            logger.info(f"L1 Threat Intel OpenSearch ingestion complete. Total points: {len(points)}")
+            return
+
+        # Upload in batches to Qdrant
         batch_size = 50
         for i in range(0, len(points), batch_size):
             batch = points[i:i + batch_size]
@@ -177,7 +301,11 @@ def ingest_l1_threat_intel():
 
 def ingest_l2_playbooks():
     """Ingests L2 playbook rules into Qdrant."""
-    if not ensure_collection("l2_playbooks"):
+    provider = vector_db_provider()
+    if provider == "opensearch":
+        if not ensure_opensearch_index(OPENSEARCH_L2_INDEX):
+            return
+    elif not ensure_collection("l2_playbooks"):
         return
 
     if not os.path.exists(PLAYBOOKS_JSON_PATH):
@@ -217,6 +345,11 @@ def ingest_l2_playbooks():
         point_id += 1
 
     if points:
+        if provider == "opensearch":
+            upload_opensearch_points(OPENSEARCH_L2_INDEX, points)
+            logger.info(f"L2 Playbooks OpenSearch ingestion complete. Total playbooks: {len(points)}")
+            return
+
         url = qdrant_api("/collections/l2_playbooks/points")
         try:
             resp = requests.put(url, json={"points": points}, timeout=10)
