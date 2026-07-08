@@ -16,6 +16,9 @@ from schema_validator import L1Finding
 from db_verifier import DatabaseVerifier
 from orchestrator import SoarOrchestrator
 from playbook_executor import PlaybookExecutor
+from policy_evaluator import OpaPolicyEvaluator
+from rate_limiter import RedisTokenBucketRateLimiter
+from safety_gate import evaluate_action_safety, acquire_action_rate_limits
 
 # Setup logging
 logging.basicConfig(
@@ -66,6 +69,22 @@ class SoarEngineApp:
         except Exception as we:
             logger.error(f"Failed to initialize AWS WAF Connector: {we}")
             self.waf = None
+
+        # Initialize Rate Limiter
+        try:
+            self.rate_limiter = RedisTokenBucketRateLimiter(redis_url=REDIS_URL)
+            logger.info("Token Bucket Rate Limiter initialized successfully in main.")
+        except Exception as rle:
+            logger.error(f"Failed to initialize Rate Limiter: {rle}")
+            self.rate_limiter = None
+
+        # Initialize OPA Policy Evaluator
+        try:
+            self.policy_evaluator = OpaPolicyEvaluator()
+            logger.info("OPA Policy Evaluator client initialized successfully in main.")
+        except Exception as oepa:
+            logger.error(f"Failed to initialize OPA Policy Evaluator: {oepa}")
+            self.policy_evaluator = None
 
     def start(self):
         logger.info("==================================================")
@@ -148,6 +167,32 @@ class SoarEngineApp:
         source_ip = data.get("source_ip", "127.0.0.1")
         attack_type = data.get("attack_type", "UNKNOWN")
         recommended_action = data.get("recommended_action", "BLOCK_IP")
+
+        # Prepare action representation
+        action = {
+            "action_id": f"act-fastpath-{str(uuid.uuid4())[:8]}",
+            "action_type": recommended_action.lower(),
+            "phase": "contain",
+            "approval_mode": "AUTO",
+            "target": {"value_masked": source_ip},
+            "status": "pending"
+        }
+        decision_context = {
+            "scoring": {"final_risk_score_0_10": 10.0},
+            "verified_case": {"title": f"Fast-Path {attack_type}"}
+        }
+
+        # Check safety policy via evaluate_action_safety
+        allowed, reason = evaluate_action_safety(self.policy_evaluator, action, decision_context)
+        if not allowed:
+            logger.error(f"[FAST-PATH SAFETY GATE BLOCKED] {recommended_action} on {source_ip}: {reason}")
+            return
+
+        # Check rate limits via acquire_action_rate_limits
+        rate_allowed, rate_reason = acquire_action_rate_limits(self.rate_limiter, action, timeout_seconds=15.0)
+        if not rate_allowed:
+            logger.error(f"[FAST-PATH RATE LIMIT BLOCKED] {recommended_action} on {source_ip}: {rate_reason}")
+            return
 
         # 0. Trigger Firewall/WAF blocking directly if connector is active and action is BLOCK_IP
         if recommended_action == "BLOCK_IP":

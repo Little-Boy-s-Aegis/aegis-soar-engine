@@ -23,6 +23,19 @@ class PlaybookExecutor:
             "Content-Type": "application/json",
             "X-Aegis-Internal-Key": AEGIS_INTERNAL_TOKEN
         }
+        # Initialize interfaces for guardrails
+        try:
+            from config import REDIS_URL
+            from rate_limiter import RedisTokenBucketRateLimiter
+            self.rate_limiter = RedisTokenBucketRateLimiter(redis_url=REDIS_URL)
+        except Exception:
+            self.rate_limiter = None
+
+        try:
+            from policy_evaluator import OpaPolicyEvaluator
+            self.policy_evaluator = OpaPolicyEvaluator()
+        except Exception:
+            self.policy_evaluator = None
 
     def execute_decision(self, decision: dict) -> None:
         """
@@ -72,6 +85,24 @@ class PlaybookExecutor:
                 run_action = False
 
             if run_action:
+                # Apply safety gate checks
+                from safety_gate import evaluate_action_safety, acquire_action_rate_limits
+                allowed, reason = evaluate_action_safety(self.policy_evaluator, action, decision)
+                if not allowed:
+                    logger.error(f"[LEGACY EXECUTOR SAFETY BLOCKED] {action_type} on {target_value}: {reason}")
+                    action["status"] = "failed"
+                    action["rationale"] = f"{action.get('rationale', '')} | Blocked by Safety Gate: {reason}"
+                    continue
+
+                is_dry_run = decision.get("dry_run", False)
+                if not is_dry_run:
+                    rate_allowed, rate_reason = acquire_action_rate_limits(self.rate_limiter, action, timeout_seconds=15.0)
+                    if not rate_allowed:
+                        logger.error(f"[LEGACY EXECUTOR RATE LIMIT BLOCKED] {action_type} on {target_value}: {rate_reason}")
+                        action["status"] = "failed"
+                        action["rationale"] = f"{action.get('rationale', '')} | Rate Limiter Timeout"
+                        continue
+
                 # Translate SOAR action to Dashboard action
                 dashboard_action_type = self._map_action_type(action_type)
                 

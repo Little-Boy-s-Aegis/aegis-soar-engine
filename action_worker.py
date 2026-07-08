@@ -14,6 +14,7 @@ from config import (
     REDIS_URL
 )
 from playbook_executor import PlaybookExecutor
+from safety_gate import evaluate_action_safety, acquire_action_rate_limits
 
 # Setup logging
 logging.basicConfig(
@@ -253,62 +254,44 @@ class SoarActionWorker:
                     logger.info(f"[DRY RUN ACTIVE] Simulating action execution workflow for {action_type} on {target_value}")
 
                 if run_action:
-                    # Check safety policies with Open Policy Agent (OPA)
-                    if self.policy_evaluator:
-                        risk_score = decision.get("scoring", {}).get("final_risk_score_0_10", 0.0)
-                        allowed, reason = self.policy_evaluator.is_action_allowed(
-                            action_type=action_type,
-                            target=target_value,
-                            phase=phase,
-                            approval_mode=approval_mode,
-                            risk_score=risk_score
-                        )
+                    # Evaluate safety policies via evaluate_action_safety helper
+                    allowed, reason = evaluate_action_safety(self.policy_evaluator, action, decision)
+                    
+                    # Log Guardrails Check to Audit Trail
+                    from audit_logger import SoarAuditLogger
+                    SoarAuditLogger.log_guardrail_check(incident_id, action, allowed, reason)
+                    
+                    if not allowed:
+                        logger.error(f"[SAFETY GATE BLOCKED] Action {action_type} on {target_value} blocked: {reason}")
+                        action["status"] = "failed"
+                        action["rationale"] = f"{action.get('rationale', '')} | Safety Blocked: {reason}"
                         
-                        # Log Guardrails Check to Audit Trail
-                        from audit_logger import SoarAuditLogger
-                        SoarAuditLogger.log_guardrail_check(incident_id, action, allowed, reason)
+                        # Trigger P0 Emergency Alert
+                        self.trigger_p0_alert(incident_id, action, reason, decision)
                         
-                        if not allowed:
-                            logger.error(f"[OPA BLOCKED] Action {action_type} on {target_value} blocked by OPA: {reason}")
-                            action["status"] = "failed"
-                            action["rationale"] = f"{action.get('rationale', '')} | OPA Blocked: {reason}"
-                            
-                            # Trigger P0 Emergency Alert
-                            self.trigger_p0_alert(incident_id, action, reason, decision)
-                            
-                            if self.redis:
-                                redis_key = f"aegis:playbook:status:{incident_id}"
-                                self.redis.hincrby(redis_key, "failed_actions", 1)
-                            self.sync_execution_progress(decision, action, incident_id)
-                            continue
+                        if self.redis:
+                            redis_key = f"aegis:playbook:status:{incident_id}"
+                            self.redis.hincrby(redis_key, "failed_actions", 1)
+                        self.sync_execution_progress(decision, action, incident_id)
+                        continue
 
                     if is_dry_run:
                         logger.info(f"[DRY RUN SIMULATION] Action {action_type} on {target_value} passed OPA/Whitelist Guardrails. Bypassing execution.")
                         action["status"] = "simulated"
                         action["rationale"] = f"{action.get('rationale', '')} | [DRY RUN] Simulated execution successfully."
                     else:
-                        # Enforce Rate Limiting per target system
-                        target_system = None
-                        if action_type in ("block_ip", "block_domain"):
-                            target_system = "fortinet"
-                        elif action_type in ("disable_account", "reset_password"):
-                            target_system = "active_directory"
-                        elif action_type in ("quarantine_host", "lift_isolation"):
-                            target_system = "crowdstrike"
+                        # Enforce Rate Limiting per target system via acquire_action_rate_limits helper
+                        rate_allowed, rate_reason = acquire_action_rate_limits(self.rate_limiter, action, timeout_seconds=15.0)
+                        if not rate_allowed:
+                            logger.error(f"[RATE LIMITER EXCEEDED] {rate_reason}. Action will fail.")
+                            action["status"] = "failed"
+                            action["rationale"] = f"{action.get('rationale', '')} | {rate_reason}"
                             
-                        if target_system and self.rate_limiter:
-                            logger.info(f"[RATE LIMITER] Acquiring token for {target_system}...")
-                            token_acquired = self.rate_limiter.acquire_token(target_system, timeout_seconds=15.0)
-                            if not token_acquired:
-                                logger.error(f"[RATE LIMITER EXCEEDED] Timeout acquiring token for {target_system}. Action will fail and trigger retry.")
-                                action["status"] = "failed"
-                                action["rationale"] = f"{action.get('rationale', '')} | Rate Limiter Timeout for {target_system}"
-                                
-                                if self.redis:
-                                    redis_key = f"aegis:playbook:status:{incident_id}"
-                                    self.redis.hincrby(redis_key, "failed_actions", 1)
-                                self.sync_execution_progress(decision, action, incident_id)
-                                continue
+                            if self.redis:
+                                redis_key = f"aegis:playbook:status:{incident_id}"
+                                self.redis.hincrby(redis_key, "failed_actions", 1)
+                            self.sync_execution_progress(decision, action, incident_id)
+                            continue
 
                         # Trigger Fortinet Firewall API Connector if it's an IP/Domain block
                         if self.fortinet:
@@ -485,19 +468,11 @@ class SoarActionWorker:
             
         logger.info(f"[FALLBACK RUNNER] Executing fallback action {fallback_action_type} on {target_value} for incident {incident_id}")
         
-        dashboard_action_type = self.executor._map_action_type(fallback_action_type)
-        success, details = self.executor._call_dashboard_perform_action(
-            actor="SOAR Action Worker (Fallback)",
-            action_type=dashboard_action_type,
-            target=target_value,
-            message=fallback_step.get("rationale", "Fallback execution due to primary action failure.")
-        )
-        
         fallback_action = {
             "action_id": fallback_step.get("step_id", "act-fallback"),
             "action_type": fallback_action_type,
             "phase": "notify" if fallback_action_type in ("notify_soc", "open_ticket") else "contain",
-            "status": "executed" if success else "failed",
+            "status": "pending",
             "rationale": fallback_step.get("rationale", ""),
             "target": {
                 "type": "ACCOUNT" if fallback_target == "soc_team" else "IP",
@@ -505,6 +480,42 @@ class SoarActionWorker:
             },
             "approval_mode": "AUTO"
         }
+
+        # Check safety policies with Open Policy Agent (OPA) / Whitelist via evaluate_action_safety helper
+        allowed, reason = evaluate_action_safety(self.policy_evaluator, fallback_action, decision)
+        if not allowed:
+            logger.error(f"[FALLBACK SAFETY GATE BLOCKED] {fallback_action_type} on {target_value}: {reason}")
+            fallback_action["status"] = "failed"
+            fallback_action["rationale"] = f"{fallback_action.get('rationale', '')} | Fallback Safety Gate Blocked: {reason}"
+            self.trigger_p0_alert(incident_id, fallback_action, reason, decision)
+            self.sync_execution_progress(decision, fallback_action, incident_id)
+            return
+
+        # Check rate limiting if not dry-run
+        is_dry_run = self.dry_run or decision.get("dry_run", False)
+        if not is_dry_run:
+            rate_allowed, rate_reason = acquire_action_rate_limits(self.rate_limiter, fallback_action, timeout_seconds=15.0)
+            if not rate_allowed:
+                logger.error(f"[FALLBACK RATE LIMITER EXCEEDED] {rate_reason}")
+                fallback_action["status"] = "failed"
+                fallback_action["rationale"] = f"{fallback_action.get('rationale', '')} | Fallback Rate Limiter Timeout"
+                self.sync_execution_progress(decision, fallback_action, incident_id)
+                return
+
+        # Now trigger the action
+        if is_dry_run:
+            fallback_action["status"] = "simulated"
+            success = True
+            details = "Simulated fallback action successfully."
+        else:
+            dashboard_action_type = self.executor._map_action_type(fallback_action_type)
+            success, details = self.executor._call_dashboard_perform_action(
+                actor="SOAR Action Worker (Fallback)",
+                action_type=dashboard_action_type,
+                target=target_value,
+                message=fallback_step.get("rationale", "Fallback execution due to primary action failure.")
+            )
+            fallback_action["status"] = "executed" if success else "failed"
         
         # Sync this fallback event to Kafka and Go backend Gateway
         self.sync_execution_progress(decision, fallback_action, incident_id)
