@@ -42,7 +42,9 @@ def sync_s3_prefix(bucket, prefix, destination):
                     continue
                 local_path = os.path.join(destination, *relative_key.split("/"))
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                s3.download_file(bucket, key, local_path)
+                response = s3.get_object(Bucket=bucket, Key=key)
+                with open(local_path, "wb") as f:
+                    f.write(response["Body"].read())
                 count += 1
         logger.info(f"Synced {count} artifact(s) from s3://{bucket}/{normalized_prefix} to {destination}")
     except Exception as exc:

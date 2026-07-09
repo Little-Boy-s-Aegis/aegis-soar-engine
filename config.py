@@ -21,7 +21,9 @@ def _sync_s3_prefix(bucket: str, prefix: str, destination: str) -> None:
                     continue
                 local_path = os.path.join(destination, *relative_key.split("/"))
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                s3.download_file(bucket, key, local_path)
+                response = s3.get_object(Bucket=bucket, Key=key)
+                with open(local_path, "wb") as f:
+                    f.write(response["Body"].read())
     except Exception as exc:
         print(f"[config] Layer artifact S3 sync skipped: {exc}")
 
