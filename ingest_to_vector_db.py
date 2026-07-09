@@ -21,6 +21,46 @@ QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
+def sync_s3_prefix(bucket, prefix, destination):
+    if not bucket or not prefix:
+        return
+    try:
+        from botocore.session import Session
+
+        os.makedirs(destination, exist_ok=True)
+        s3 = Session().create_client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+        paginator = s3.get_paginator("list_objects_v2")
+        normalized_prefix = prefix if prefix.endswith("/") else f"{prefix}/"
+        count = 0
+        for page in paginator.paginate(Bucket=bucket, Prefix=normalized_prefix):
+            for item in page.get("Contents", []):
+                key = item.get("Key", "")
+                if not key or key.endswith("/"):
+                    continue
+                relative_key = key[len(normalized_prefix):]
+                if not relative_key:
+                    continue
+                local_path = os.path.join(destination, *relative_key.split("/"))
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                s3.download_file(bucket, key, local_path)
+                count += 1
+        logger.info(f"Synced {count} artifact(s) from s3://{bucket}/{normalized_prefix} to {destination}")
+    except Exception as exc:
+        logger.warning(f"Layer artifact S3 sync skipped for s3://{bucket}/{prefix}: {exc}")
+
+
+def prepare_layer_artifacts_from_s3():
+    local_root = os.getenv("LAYER_ARTIFACTS_LOCAL_DIR", "/tmp/aegis-layer-artifacts")
+    bucket = os.getenv("LAYER_ARTIFACTS_S3_BUCKET", "")
+    if bucket:
+        sync_s3_prefix(bucket, os.getenv("LAYER1_ARTIFACTS_S3_PREFIX", "layer1/"), os.path.join(local_root, "layer1"))
+        sync_s3_prefix(bucket, os.getenv("LAYER2_ARTIFACTS_S3_PREFIX", "layer2/"), os.path.join(local_root, "layer2"))
+    return local_root
+
+
+LAYER_ARTIFACTS_LOCAL_DIR = prepare_layer_artifacts_from_s3()
+
+
 def first_existing_path(paths, fallback):
     for path in paths:
         if path and os.path.exists(path):
@@ -32,6 +72,7 @@ def first_existing_path(paths, fallback):
 L1_DIR = first_existing_path(
     [
         os.getenv("AGENT_L1_DIR"),
+        os.path.join(LAYER_ARTIFACTS_LOCAL_DIR, "layer1"),
         "/agent-layer-1",
         "/app/agent-layer-1",
         os.path.join(SCRIPT_DIR, "..", "agent-layer-1"),
@@ -41,6 +82,7 @@ L1_DIR = first_existing_path(
 AGENT_L2_DIR = first_existing_path(
     [
         os.getenv("AGENT_L2_DIR"),
+        os.path.join(LAYER_ARTIFACTS_LOCAL_DIR, "layer2"),
         "/app/agent-layer-2",
         "/agent-layer-2",
         os.path.join(SCRIPT_DIR, "..", "agent-layer-2"),
