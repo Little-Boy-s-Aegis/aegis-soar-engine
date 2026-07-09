@@ -178,6 +178,8 @@ class PlaybookExecutor:
             "force_logout": "Force Logout",
             "disable_account": "Revoke Credentials",
             "limit_network": "Isolate Host",
+            "deploy_waf_rule": "Deploy WAF Rule",
+            "deploy_waf_virtual_patch": "Deploy WAF Rule",
             "preserve_logs": "Preserve Logs",
             "open_ticket": "Open Ticket",
             "notify_soc": "Notify SOC"

@@ -28,6 +28,41 @@ logging.basicConfig(
 logger = logging.getLogger("soar-engine")
 
 
+def _as_list(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value if v not in (None, "")]
+    return [str(value)]
+
+
+def extract_l1_entity_lists(finding: dict) -> dict:
+    """Accept both legacy list entities and the new per-agent flat entity keys."""
+    entities = finding.get("entities", {}) or {}
+    ips = []
+    for key in ("ips", "source_ip", "destination_ip"):
+        ips.extend(_as_list(entities.get(key)))
+
+    users = []
+    for key in ("users", "username"):
+        users.extend(_as_list(entities.get(key)))
+
+    hosts = []
+    for key in ("hosts", "hostname"):
+        hosts.extend(_as_list(entities.get(key)))
+
+    accounts = []
+    for key in ("accounts_masked", "account_ref"):
+        accounts.extend(_as_list(entities.get(key)))
+
+    return {
+        "ips": list(dict.fromkeys(ips)),
+        "users": list(dict.fromkeys(users)),
+        "hosts": list(dict.fromkeys(hosts)),
+        "accounts_masked": list(dict.fromkeys(accounts)),
+    }
+
+
 class SoarEngineApp:
     """Main application orchestrating the L2 SOAR consumer pipeline."""
 
@@ -244,9 +279,9 @@ class SoarEngineApp:
             return
 
         # Find correlation key: IP or Username
-        entities = finding.get("entities", {}) or {}
-        ips = entities.get("ips", [])
-        users = entities.get("users", [])
+        normalized_entities = extract_l1_entity_lists(finding)
+        ips = normalized_entities.get("ips", [])
+        users = normalized_entities.get("users", [])
         
         corr_key = None
         if ips:
@@ -285,7 +320,7 @@ class SoarEngineApp:
         # 1. Independent Verification Lookup from Postgres
         verified_logs = []
         for f in findings:
-            entities = f.get("entities", {}) or {}
+            entities = extract_l1_entity_lists(f)
             ips = entities.get("ips", [])
             
             if ips:

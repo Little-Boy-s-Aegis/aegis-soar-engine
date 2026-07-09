@@ -1,5 +1,4 @@
 import os
-import csv
 import json
 import hashlib
 import random
@@ -19,10 +18,50 @@ VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "").strip().lower()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
 
-# Paths relative to this script
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-L1_DIR = os.path.join(SCRIPT_DIR, "..", "agent-layer-1")
+
+
+def first_existing_path(paths, fallback):
+    for path in paths:
+        if path and os.path.exists(path):
+            return path
+    return fallback
+
+
+# Paths relative to this script, with container mount fallbacks.
+L1_DIR = first_existing_path(
+    [
+        os.getenv("AGENT_L1_DIR"),
+        "/agent-layer-1",
+        "/app/agent-layer-1",
+        os.path.join(SCRIPT_DIR, "..", "agent-layer-1"),
+    ],
+    os.path.join(SCRIPT_DIR, "..", "agent-layer-1"),
+)
+AGENT_L2_DIR = first_existing_path(
+    [
+        os.getenv("AGENT_L2_DIR"),
+        "/app/agent-layer-2",
+        "/agent-layer-2",
+        os.path.join(SCRIPT_DIR, "..", "agent-layer-2"),
+    ],
+    os.path.join(SCRIPT_DIR, "..", "agent-layer-2"),
+)
 PLAYBOOKS_JSON_PATH = os.path.join(SCRIPT_DIR, "playbooks.json")
+L2_PLAYBOOKS_MD_PATH = os.getenv(
+    "L2_PLAYBOOKS_MD_PATH",
+    os.path.join(AGENT_L2_DIR, "orchestrator_l2_playbooks.md"),
+)
+
+L1_REFERENCE_FILES = [
+    "attack_vector_prediction_reference.md",
+    "capec_attack_pattern_prediction_reference.md",
+    "edge_case_matrix.md",
+    "surface_context_matrix.md",
+    "agent_a_internal_network_edr_capec_attack_matrix.md",
+    "agent_b_ebanking_api_web_capec_attack_matrix.md",
+    "agent_c_atm_iam_capec_attack_matrix.md",
+]
 
 def qdrant_api(path):
     """Build Qdrant REST URLs without assuming a versioned API prefix."""
@@ -199,8 +238,149 @@ def upload_opensearch_points(index_name, points, batch_size=50):
         except Exception as e:
             logger.error(f"Failed to upload OpenSearch batch {i//batch_size + 1} to '{index_name}': {e}")
 
+
+def stable_point_id(namespace, *parts):
+    text = "|".join([namespace, *[str(p) for p in parts]])
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+
+
+def parse_markdown_tables(file_path):
+    rows = []
+    headers = None
+    with open(file_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line.startswith("|"):
+                headers = None
+                continue
+
+            parts = [part.strip().strip("`") for part in line.split("|")[1:-1]]
+            if not parts:
+                continue
+
+            if all(part.replace(":", "").replace("-", "") == "" for part in parts):
+                continue
+
+            if headers is None:
+                headers = [part.lower().replace(" ", "_") for part in parts]
+                continue
+
+            if len(parts) != len(headers):
+                continue
+
+            row = dict(zip(headers, parts))
+            if any(value for value in row.values()):
+                rows.append(row)
+    return rows
+
+
+def row_value(row, *keys):
+    for key in keys:
+        value = row.get(key)
+        if value:
+            return value
+    return ""
+
+
+def iter_l1_reference_points():
+    if not os.path.isdir(L1_DIR):
+        logger.warning(f"Layer 1 directory not found: {L1_DIR}")
+        return
+
+    for agent_name in sorted(os.listdir(L1_DIR)):
+        agent_dir = os.path.join(L1_DIR, agent_name)
+        if not os.path.isdir(agent_dir) or not agent_name.startswith("agent_"):
+            continue
+
+        for filename in L1_REFERENCE_FILES:
+            file_path = os.path.join(agent_dir, filename)
+            if not os.path.exists(file_path):
+                continue
+
+            rows = parse_markdown_tables(file_path)
+            logger.info(f"Parsed {len(rows)} L1 reference row(s) from {file_path}")
+            for index, row in enumerate(rows, start=1):
+                intel_id = row_value(row, "attack_id", "capec_id", "id") or f"{agent_name}-{filename}-{index}"
+                title = row_value(row, "attack_vector", "attack_pattern", "edge_case", "surface", "watch_focus") or intel_id
+                description = row_value(row, "description", "watch_focus", "prediction_context", "data_sources")
+                watch_signal = row_value(row, "watch_focus", "prediction_context", "data_sources", "scoped_surfaces")
+                source_file = f"{agent_name}/{filename}"
+                text_to_embed = (
+                    f"Layer 1 {agent_name} reference from {filename}. "
+                    f"ID: {intel_id}. Title: {title}. Description: {description}. "
+                    f"Watch signal: {watch_signal}. Row: {json.dumps(row, ensure_ascii=False)}"
+                )
+                yield {
+                    "id": stable_point_id("l1", agent_name, filename, index, intel_id, title),
+                    "vector": get_qwen_embedding(text_to_embed, DASHSCOPE_API_KEY),
+                    "payload": {
+                        "intel_type": "l1_reference",
+                        "agent": agent_name,
+                        "source_file": source_file,
+                        "id": intel_id,
+                        "title": title,
+                        "description": description,
+                        "watch_signal": watch_signal,
+                        "row": row,
+                    },
+                }
+
+
+def iter_l2_markdown_playbook_points():
+    if not os.path.exists(L2_PLAYBOOKS_MD_PATH):
+        logger.warning(f"L2 playbook markdown path not found: {L2_PLAYBOOKS_MD_PATH}")
+        return
+
+    with open(L2_PLAYBOOKS_MD_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    current_id = None
+    current_lines = []
+
+    def emit():
+        if not current_id or not current_lines:
+            return None
+        body = "".join(current_lines).strip()
+        text_to_embed = f"Layer 2 playbook {current_id}. {body}"
+        return {
+            "id": stable_point_id("l2-md", current_id),
+            "vector": get_qwen_embedding(text_to_embed, DASHSCOPE_API_KEY),
+            "payload": {
+                "playbook_id": current_id,
+                "name": current_id,
+                "source_file": os.path.basename(L2_PLAYBOOKS_MD_PATH),
+                "source_type": "markdown_playbook",
+                "body": body,
+                "steps": [],
+            },
+        }
+
+    for line in lines:
+        heading = line.strip()
+        if heading.startswith("### PB-"):
+            point = emit()
+            if point:
+                yield point
+            current_id = heading.replace("#", "").strip().split()[0]
+            current_lines = [line]
+        elif current_id:
+            if heading.startswith("## ") and not heading.startswith("### "):
+                point = emit()
+                if point:
+                    yield point
+                current_id = None
+                current_lines = []
+            else:
+                current_lines.append(line)
+
+    point = emit()
+    if point:
+        yield point
+
+
 def ingest_l1_threat_intel():
-    """Ingests L1 CAPEC and MITRE ATT&CK reference data into Qdrant."""
+    """Ingests per-agent Layer 1 reference data into the existing vector DB collection."""
     provider = vector_db_provider()
     if provider == "opensearch":
         if not ensure_opensearch_index(OPENSEARCH_L1_INDEX):
@@ -208,96 +388,29 @@ def ingest_l1_threat_intel():
     elif not ensure_collection("l1_threat_intel"):
         return
 
-    points = []
-    point_id = 1
+    logger.info(f"Parsing Layer 1 per-agent references from: {L1_DIR}")
+    points = list(iter_l1_reference_points() or [])
+    if not points:
+        logger.warning("No Layer 1 reference points were produced for vector ingestion.")
+        return
 
-    # 1. Parse capec_attack_pattern_scores.csv
-    capec_csv = os.path.join(L1_DIR, "capec_attack_pattern_scores.csv")
-    if os.path.exists(capec_csv):
-        logger.info(f"Parsing L1 CAPEC CSV: {capec_csv}")
-        with open(capec_csv, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                capec_id = row.get("capec_id", "")
-                attack_pattern = row.get("attack_pattern", "")
-                description = row.get("description", "")
-                
-                text_to_embed = f"CAPEC: {capec_id} - {attack_pattern}. Description: {description}"
-                embedding = get_qwen_embedding(text_to_embed, DASHSCOPE_API_KEY)
-                
-                payload = {
-                    "intel_type": "capec",
-                    "id": capec_id,
-                    "title": attack_pattern,
-                    "description": description,
-                    "severity_label": row.get("severity_label", "Unknown"),
-                    "score_0_10": float(row.get("score_0_10", "5.0") or "5.0"),
-                    "recommended_action": row.get("recommended_action", ""),
-                    "auto_containment_allowed": row.get("auto_containment_allowed", "False").lower() == "true",
-                    "related_attack_techniques": row.get("related_attack_techniques", "")
-                }
-                points.append({
-                    "id": point_id,
-                    "vector": embedding,
-                    "payload": payload
-                })
-                point_id += 1
-    else:
-        logger.warning(f"L1 CAPEC CSV path not found: {capec_csv}")
+    if provider == "opensearch":
+        upload_opensearch_points(OPENSEARCH_L1_INDEX, points)
+        logger.info(f"L1 Threat Intel OpenSearch ingestion complete. Total points: {len(points)}")
+        return
 
-    # 2. Parse attack_vector_scores.csv
-    attack_csv = os.path.join(L1_DIR, "attack_vector_scores.csv")
-    if os.path.exists(attack_csv):
-        logger.info(f"Parsing L1 Attack Vectors CSV: {attack_csv}")
-        with open(attack_csv, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                attack_id = row.get("attack_id", "")
-                attack_vector = row.get("attack_vector", "")
-                description = row.get("description", "")
-                
-                text_to_embed = f"MITRE Technique: {attack_id} - {attack_vector}. Description: {description}"
-                embedding = get_qwen_embedding(text_to_embed, DASHSCOPE_API_KEY)
-                
-                payload = {
-                    "intel_type": "mitre_attack",
-                    "id": attack_id,
-                    "title": attack_vector,
-                    "description": description,
-                    "severity_label": row.get("severity_label", "Unknown"),
-                    "score_0_10": float(row.get("score_0_10", "5.0") or "5.0"),
-                    "recommended_action": row.get("recommended_action", ""),
-                    "auto_containment_allowed": row.get("auto_containment_allowed", "False").lower() == "true",
-                    "primary_surfaces": row.get("primary_surfaces", "")
-                }
-                points.append({
-                    "id": point_id,
-                    "vector": embedding,
-                    "payload": payload
-                })
-                point_id += 1
-    else:
-        logger.warning(f"L1 Attack Vectors CSV path not found: {attack_csv}")
+    batch_size = 50
+    for i in range(0, len(points), batch_size):
+        batch = points[i:i + batch_size]
+        url = qdrant_api("/collections/l1_threat_intel/points")
+        try:
+            resp = requests.put(url, json={"points": batch}, timeout=10)
+            resp.raise_for_status()
+            logger.info(f"Uploaded L1 batch {i//batch_size + 1}: {len(batch)} points.")
+        except Exception as e:
+            logger.error(f"Failed to upload L1 batch {i//batch_size + 1}: {e}")
 
-    if points:
-        if provider == "opensearch":
-            upload_opensearch_points(OPENSEARCH_L1_INDEX, points)
-            logger.info(f"L1 Threat Intel OpenSearch ingestion complete. Total points: {len(points)}")
-            return
-
-        # Upload in batches to Qdrant
-        batch_size = 50
-        for i in range(0, len(points), batch_size):
-            batch = points[i:i + batch_size]
-            url = qdrant_api("/collections/l1_threat_intel/points")
-            try:
-                resp = requests.put(url, json={"points": batch}, timeout=10)
-                resp.raise_for_status()
-                logger.info(f"Uploaded L1 batch {i//batch_size + 1}: {len(batch)} points.")
-            except Exception as e:
-                logger.error(f"Failed to upload L1 batch {i//batch_size + 1}: {e}")
-                
-        logger.info(f"L1 Threat Intel ingestion complete. Total points: {point_id - 1}")
+    logger.info(f"L1 Threat Intel ingestion complete. Total points: {len(points)}")
 
 def ingest_l2_playbooks():
     """Ingests L2 playbook rules into Qdrant."""
@@ -308,41 +421,44 @@ def ingest_l2_playbooks():
     elif not ensure_collection("l2_playbooks"):
         return
 
-    if not os.path.exists(PLAYBOOKS_JSON_PATH):
-        logger.warning(f"Playbooks JSON path not found: {PLAYBOOKS_JSON_PATH}")
-        return
-
-    logger.info(f"Parsing L2 Playbooks: {PLAYBOOKS_JSON_PATH}")
-    with open(PLAYBOOKS_JSON_PATH, "r", encoding="utf-8") as f:
-        playbooks = json.load(f)
-
     points = []
-    point_id = 10000  # Start L2 point IDs at 10000
 
-    for pb_id, pb in playbooks.items():
-        name = pb.get("name", "")
-        steps_summary = []
-        for step in pb.get("steps", []):
-            step_type = step.get("type", "")
-            action_type = step.get("action_type", "")
-            rationale = step.get("rationale", "")
-            steps_summary.append(f"Step type: {step_type}, Action: {action_type}. Rationale: {rationale}")
-        
-        steps_text = "; ".join(steps_summary)
-        text_to_embed = f"Playbook: {pb_id} - {name}. Steps: {steps_text}"
-        embedding = get_qwen_embedding(text_to_embed, DASHSCOPE_API_KEY)
-        
-        payload = {
-            "playbook_id": pb_id,
-            "name": name,
-            "steps": pb.get("steps", [])
-        }
-        points.append({
-            "id": point_id,
-            "vector": embedding,
-            "payload": payload
-        })
-        point_id += 1
+    if os.path.exists(PLAYBOOKS_JSON_PATH):
+        logger.info(f"Parsing L2 runtime playbooks JSON: {PLAYBOOKS_JSON_PATH}")
+        with open(PLAYBOOKS_JSON_PATH, "r", encoding="utf-8") as f:
+            playbooks = json.load(f)
+
+        for pb_id, pb in playbooks.items():
+            name = pb.get("name", "")
+            steps_summary = []
+            for step in pb.get("steps", []):
+                step_type = step.get("type", "")
+                action_type = step.get("action_type", "")
+                rationale = step.get("rationale", "")
+                steps_summary.append(f"Step type: {step_type}, Action: {action_type}. Rationale: {rationale}")
+
+            steps_text = "; ".join(steps_summary)
+            text_to_embed = f"Runtime playbook: {pb_id} - {name}. Steps: {steps_text}"
+            embedding = get_qwen_embedding(text_to_embed, DASHSCOPE_API_KEY)
+
+            payload = {
+                "playbook_id": pb_id,
+                "name": name,
+                "source_file": os.path.basename(PLAYBOOKS_JSON_PATH),
+                "source_type": "runtime_json_playbook",
+                "steps": pb.get("steps", []),
+            }
+            points.append({
+                "id": stable_point_id("l2-json", pb_id),
+                "vector": embedding,
+                "payload": payload,
+            })
+    else:
+        logger.warning(f"Playbooks JSON path not found: {PLAYBOOKS_JSON_PATH}")
+
+    markdown_points = list(iter_l2_markdown_playbook_points() or [])
+    logger.info(f"Parsed {len(markdown_points)} L2 canonical markdown playbook point(s).")
+    points.extend(markdown_points)
 
     if points:
         if provider == "opensearch":
@@ -357,6 +473,8 @@ def ingest_l2_playbooks():
             logger.info(f"Uploaded L2 Playbooks successfully. Total playbooks: {len(points)}")
         except Exception as e:
             logger.error(f"Failed to upload L2 Playbooks: {e}")
+    else:
+        logger.warning("No L2 playbook points were produced for vector ingestion.")
 
 if __name__ == "__main__":
     logger.info("Starting ingestion of POC & Playbook data into Qdrant...")

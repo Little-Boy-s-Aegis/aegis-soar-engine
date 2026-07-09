@@ -30,7 +30,15 @@ DEFAULT_EXECUTION_WINDOW_END = os.getenv("EXECUTION_WINDOW_END", "20:00")
 DEFAULT_TIMEZONE = os.getenv("EXECUTION_TIMEZONE", "Asia/Ho_Chi_Minh")
 
 # Path to offline files (mounted from agent-layer-2 directory)
-AGENT_L2_DIR = os.getenv("AGENT_L2_DIR", "/app/agent-layer-2")
+def _default_agent_l2_dir():
+    repo_neighbor = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agent-layer-2"))
+    for candidate in ("/app/agent-layer-2", "/agent-layer-2", repo_neighbor):
+        if os.path.exists(os.path.join(candidate, "layer2_orchestrator_system_prompt.md")):
+            return candidate
+    return "/app/agent-layer-2"
+
+
+AGENT_L2_DIR = os.getenv("AGENT_L2_DIR", _default_agent_l2_dir())
 SYSTEM_PROMPT_PATH = os.path.join(AGENT_L2_DIR, "layer2_orchestrator_system_prompt.md")
 OUTPUT_SCHEMA_PATH = os.path.join(AGENT_L2_DIR, "layer2_orchestrator_output_schema.json")
 PLAYBOOKS_PATH = os.path.join(AGENT_L2_DIR, "orchestrator_l2_playbooks.md")
@@ -39,4 +47,3 @@ MITRE_ATTACK_JSON_PATH = os.path.join(AGENT_L2_DIR, "mitre_attack_full.json")
 
 # Redis State Database Config
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-

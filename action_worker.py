@@ -360,7 +360,7 @@ class SoarActionWorker:
                                     action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Failed: {waf_msg}"
                                 from audit_logger import SoarAuditLogger
                                 SoarAuditLogger.log_api_response(incident_id, "aws_waf", "block_ip", {"target": target_value}, waf_success, waf_msg)
-                            elif action_type == "deploy_waf_rule":
+                            elif action_type in ("deploy_waf_rule", "deploy_waf_virtual_patch"):
                                 # Target value represents attack type (e.g. SQLi), rationale might contain the URL pattern
                                 url_pattern = action.get("target", {}).get("value_masked", "/")
                                 waf_success, waf_msg = self.waf.deploy_mitigation_rule(target_value, url_pattern)
@@ -369,7 +369,7 @@ class SoarActionWorker:
                                 else:
                                     action["rationale"] = f"{action.get('rationale', '')} | AWS WAF Rule Failed: {waf_msg}"
                                 from audit_logger import SoarAuditLogger
-                                SoarAuditLogger.log_api_response(incident_id, "aws_waf", "deploy_waf_rule", {"target": target_value, "pattern": url_pattern}, waf_success, waf_msg)
+                                SoarAuditLogger.log_api_response(incident_id, "aws_waf", action_type, {"target": target_value, "pattern": url_pattern}, waf_success, waf_msg)
 
                         dashboard_action_type = self.executor._map_action_type(action_type)
                         

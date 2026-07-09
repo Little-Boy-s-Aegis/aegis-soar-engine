@@ -23,7 +23,7 @@ class L1Finding(BaseModel):
     agent_name: str
     agent_type: str
     threat_detected: bool
-    finding_type: str  # confirmed_threat | suspected_threat | anomaly_no_mapping | no_threat | prompt_injection_attempt
+    finding_type: str  # observed_threat_pattern | observed_suspicious_pattern | anomaly_no_mapping | no_threat | prompt_injection_attempt
     capec_id: str = ""
     mitre_attack_id: str = ""
     raw_evidence: str
@@ -33,12 +33,15 @@ class L1Finding(BaseModel):
     banking_domain_observed: Optional[Dict[str, Any]] = None
     entities: Optional[Dict[str, Any]] = None
     attack_mapping: Optional[Dict[str, Any]] = None
+    attack_vector_prediction: Optional[Dict[str, Any]] = None
+    capec_attack_pattern_prediction: Optional[Dict[str, Any]] = None
     surfaces_and_context: Optional[Dict[str, Any]] = None
+    attack_pattern_prediction: Optional[Dict[str, Any]] = None
     quality: Optional[Dict[str, Any]] = None
 
 
 # ==========================================
-# Output Schema: littleboy.soc.layer2.orchestrator_decision.v7
+# Output Schema: littleboy.soc.layer2.orchestrator_decision.v8
 # ==========================================
 class L2Orchestrator(BaseModel):
     orchestrator_id: str = "layer2_orchestrator_soar"
@@ -67,12 +70,22 @@ class L2CorrelationKeys(BaseModel):
     evidence_terms: List[str] = []
 
 
+class L2UnrelatedFinding(BaseModel):
+    agent_id: Optional[str] = None
+    timestamp: Optional[str] = None
+    capec_id: str = ""
+    mitre_attack_id: str = ""
+    reason: Optional[str] = None
+    recommended_handling: str = "monitor_only"
+
+
 class L2Correlation(BaseModel):
     correlation_state: str  # confirmed | partial | conflict | none
     same_attack_assessment: bool
     correlated_agent_ids: List[str] = []
     conflicting_agent_ids: List[str] = []
     correlation_keys: L2CorrelationKeys
+    unrelated_findings: List[L2UnrelatedFinding] = []
     correlation_rationale: List[str] = []
 
 
@@ -80,6 +93,10 @@ class L2VerificationSource(BaseModel):
     source_type: str  # clean_log | raw_log | siem | edr ...
     source_ref: Optional[str] = None
     matched_observation: Optional[str] = None
+    query_status: str = "matched"
+    freshness_seconds: Optional[int] = None
+    last_seen_at: Optional[str] = None
+    error_ref: Optional[str] = None
 
 
 class L2IndependentVerification(BaseModel):
@@ -156,6 +173,21 @@ class L2ExecutionWindow(BaseModel):
     outside_window_behavior: str = "suggest_only_and_report"
 
 
+class L2AutoContainmentGates(BaseModel):
+    threat_confirmed: bool = False
+    l2_verification_performed: bool = False
+    verification_confirmed: bool = False
+    verification_supported_or_strong: bool = False
+    risk_above_floor: bool = False
+    opa_allow: bool = False
+    soc_autopilot_on: bool = False
+    execution_window_open: bool = False
+    action_scoped_timebound_reversible: bool = False
+    rollback_available: bool = False
+    dangerous_now_behavior: bool = False
+    verified_target_entity: bool = False
+
+
 class L2AutomationControl(BaseModel):
     soc_autopilot_enabled: bool = False
     mode: str = "suggest_only"
@@ -163,6 +195,7 @@ class L2AutomationControl(BaseModel):
     auto_containment_path: str = "none"
     execution_window: L2ExecutionWindow
     next_review_minutes: int = 120
+    auto_containment_gates: L2AutoContainmentGates = L2AutoContainmentGates()
     auto_containment_eligible: bool = False
     containment_gate_rationale: List[str] = []
     auto_unblock_after_mins: Optional[int] = None
@@ -179,7 +212,7 @@ class L2PlaybookInstance(BaseModel):
 
 class L2PlaybookRouting(BaseModel):
     activated_playbooks: List[L2PlaybookInstance]
-    not_selected: List[str] = []
+    not_selected: List[Dict[str, Any]] = []
 
 
 class L2RiskResponseFloor(BaseModel):
@@ -208,6 +241,8 @@ class L2Target(BaseModel):
 
 class L2Action(BaseModel):
     action_id: Optional[str]
+    timestamp: str
+    priority: str
     phase: str  # preserve | contain | hunt | recover | notify | predict
     action_type: str  # preserve_logs | add_watchlist ...
     target: L2Target
@@ -286,7 +321,7 @@ class L2Quality(BaseModel):
 
 
 class L2OrchestratorDecision(BaseModel):
-    schema_version: str = "littleboy.soc.layer2.orchestrator_decision.v7"
+    schema_version: str = "littleboy.soc.layer2.orchestrator_decision.v8"
     timestamp: str
     orchestrator: L2Orchestrator
     input_summary: L2InputSummary
