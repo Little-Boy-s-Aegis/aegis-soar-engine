@@ -6,11 +6,8 @@ verifications and offline risk tables as context, and outputting validated L2 JS
 """
 
 import json
-import hashlib
 import logging
-import math
 import os
-import random
 import re
 import time
 from urllib.parse import urlparse
@@ -18,11 +15,13 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 import redis
 from config import (
-    DASHSCOPE_API_KEY, QWEN_MODEL_NAME, QWEN_BASE_URL,
-    SYSTEM_PROMPT_PATH, RISK_SCORING_DIR, LLM_TIMEOUT_SECONDS, LLM_ENABLED,
+    LLM_PROVIDER, DASHSCOPE_API_KEY, QWEN_MODEL_NAME, QWEN_BASE_URL,
+    BEDROCK_MODEL_ID, BEDROCK_REGION, SYSTEM_PROMPT_PATH, RISK_SCORING_DIR,
+    LLM_TIMEOUT_SECONDS, LLM_MAX_TOKENS, LLM_ENABLED,
     REDIS_URL, SOC_AUTOPILOT_ENABLED, DEFAULT_EXECUTION_WINDOW_START,
     DEFAULT_EXECUTION_WINDOW_END, DEFAULT_TIMEZONE
 )
+from embedding_provider import get_text_embedding, stable_mock_embedding
 from schema_validator import L2OrchestratorDecision
 
 logger = logging.getLogger("soar-engine.orchestrator")
@@ -198,11 +197,7 @@ def _target_type_for_action(action_type: str, target_type: str | None = None) ->
 
 
 def _stable_mock_embedding(text, size=1024):
-    seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
-    rng = random.Random(seed)
-    vector = [rng.uniform(-1.0, 1.0) for _ in range(size)]
-    norm = math.sqrt(sum(x * x for x in vector)) or 1.0
-    return [x / norm for x in vector]
+    return stable_mock_embedding(text, size=size)
 
 
 def _vector_db_provider():
@@ -353,6 +348,7 @@ class SoarOrchestrator:
     def __init__(self):
         self.risk_kb = RiskTableParser()
         self.client = None
+        self.llm_provider = LLM_PROVIDER
         self.system_prompt = ""
 
         # Load L2 standalone system prompt
@@ -363,15 +359,28 @@ class SoarOrchestrator:
         else:
             logger.error(f"System prompt file not found at: {SYSTEM_PROMPT_PATH}")
 
-        # Initialize OpenAI client pointing to DashScope/Qwen
-        if LLM_ENABLED and DASHSCOPE_API_KEY:
+        if LLM_ENABLED and self.llm_provider == "bedrock":
+            from botocore.config import Config
+            from botocore.session import Session
+
+            self.client = Session().create_client(
+                "bedrock-runtime",
+                region_name=BEDROCK_REGION,
+                config=Config(
+                    connect_timeout=min(LLM_TIMEOUT_SECONDS, 10),
+                    read_timeout=LLM_TIMEOUT_SECONDS,
+                    retries={"max_attempts": 2, "mode": "standard"},
+                ),
+            )
+            logger.info(f"Bedrock Qwen client initialized: {BEDROCK_MODEL_ID} ({BEDROCK_REGION})")
+        elif LLM_ENABLED and DASHSCOPE_API_KEY:
             self.client = OpenAI(
                 api_key=DASHSCOPE_API_KEY,
                 base_url=QWEN_BASE_URL
             )
-            logger.info(f"Qwen API Client initialized: {QWEN_BASE_URL} (Model: {QWEN_MODEL_NAME})")
+            logger.info(f"DashScope Qwen client initialized: {QWEN_BASE_URL} (Model: {QWEN_MODEL_NAME})")
         else:
-            logger.warning("LLM disabled or DASHSCOPE_API_KEY not set. Operating in Suggest-Only Local Fallback mode.")
+            logger.warning("LLM disabled or credentials/provider not configured. Operating in Suggest-Only Local Fallback mode.")
 
         # Initialize structured Playbook Runner
         from playbook_runner import PlaybookRunner
@@ -387,6 +396,65 @@ class SoarOrchestrator:
             self.redis = None
             self.state_machine = IncidentStateMachine(None)
 
+    def _invoke_bedrock_qwen(self, user_prompt: str) -> str:
+        payload = {
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": f"{user_prompt}\n\nReturn only a valid JSON object."},
+            ],
+            "max_tokens": LLM_MAX_TOKENS,
+            "temperature": 0,
+        }
+        response = self.client.invoke_model(
+            modelId=BEDROCK_MODEL_ID,
+            body=json.dumps(payload),
+            contentType="application/json",
+            accept="application/json",
+        )
+        data = json.loads(response["body"].read())
+        return self._extract_bedrock_text(data)
+
+    def _extract_bedrock_text(self, data: dict) -> str:
+        candidates = [
+            data.get("output_text"),
+            data.get("text"),
+            data.get("response"),
+        ]
+
+        output_message = data.get("output", {}).get("message", {})
+        for item in output_message.get("content", []) if isinstance(output_message, dict) else []:
+            if isinstance(item, dict):
+                candidates.append(item.get("text"))
+
+        for item in data.get("content", []) if isinstance(data.get("content"), list) else []:
+            if isinstance(item, dict):
+                candidates.append(item.get("text"))
+
+        choices = data.get("choices", [])
+        if choices:
+            message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+            candidates.append(message.get("content") or choices[0].get("text"))
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        raise ValueError(f"Could not extract text from Bedrock response keys: {list(data.keys())}")
+
+    def _invoke_llm(self, user_prompt: str) -> str:
+        if self.llm_provider == "bedrock":
+            return self._invoke_bedrock_qwen(user_prompt)
+
+        response = self.client.chat.completions.create(
+            model=QWEN_MODEL_NAME,
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            timeout=LLM_TIMEOUT_SECONDS
+        )
+        return response.choices[0].message.content
+
     def _query_vector_db_playbooks(self, text: str) -> str:
         """Query Qdrant to get related playbooks for Layer 2 decision context."""
         provider = _vector_db_provider()
@@ -395,24 +463,10 @@ class SoarOrchestrator:
 
         qdrant_url = os.getenv("QDRANT_URL", "http://qdrant:6333")
         opensearch_endpoint = os.getenv("OPENSEARCH_ENDPOINT", "").rstrip("/")
-        api_key = DASHSCOPE_API_KEY
             
         try:
             import requests
-            vector = _stable_mock_embedding(text)
-            if api_key and not api_key.startswith("mock"):
-                url = f"{QWEN_BASE_URL}/embeddings"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "text-embedding-v3",
-                    "input": text
-                }
-                resp = requests.post(url, json=payload, headers=headers, timeout=3)
-                if resp.status_code == 200:
-                    vector = resp.json()["data"][0]["embedding"]
+            vector = get_text_embedding(text, dashscope_api_key=DASHSCOPE_API_KEY)
 
             if provider == "opensearch":
                 if not opensearch_endpoint:
@@ -578,19 +632,8 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
         # 3. Call LLM (with Timeout Guard)
         if self.client and LLM_ENABLED:
             try:
-                logger.info(f"Calling Qwen API for L2 Orchestration (Timeout: {LLM_TIMEOUT_SECONDS}s)...")
-                
-                response = self.client.chat.completions.create(
-                    model=QWEN_MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    timeout=LLM_TIMEOUT_SECONDS
-                )
-                
-                raw_response = response.choices[0].message.content
+                logger.info(f"Calling {self.llm_provider} Qwen for L2 Orchestration (Timeout: {LLM_TIMEOUT_SECONDS}s)...")
+                raw_response = self._invoke_llm(user_prompt)
                 logger.info("Successfully received response from Qwen Orchestrator.")
                 
                 # Parse and validate response

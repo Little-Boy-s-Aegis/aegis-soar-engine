@@ -75,7 +75,11 @@ Configure the engine using these environment variables (or define them in your `
 | `KAFKA_BROKERS` | `localhost:9094` | Comma-separated Kafka broker endpoints |
 | `REDIS_URL` | `redis://localhost:6379/0` | Connection string for Redis state tracking |
 | `DATABASE_URL` | `postgres://postgres:1@localhost:5432/aegis` | Postgres DSN for independent verifications |
-| `DASHSCOPE_API_KEY` | *(Required)* | API key to access Qwen LLM endpoint |
+| `LLM_PROVIDER` | `dashscope` | Set to `bedrock` for Amazon Bedrock Qwen or `dashscope` for OpenAI-compatible DashScope |
+| `BEDROCK_MODEL_ID` | `qwen.qwen3-coder-next` | Bedrock Qwen model ID when `LLM_PROVIDER=bedrock` |
+| `BEDROCK_REGION` | `AWS_REGION` | Bedrock runtime region for Qwen |
+| `BEDROCK_EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for Qdrant vectors |
+| `DASHSCOPE_API_KEY` | *(Optional)* | API key for the legacy DashScope path |
 | `SOC_AUTOPILOT_ENABLED` | `False` | Set to `True` to allow automatic containment |
 | `AEGIS_SECURITY_SYNC_TOKEN` | `admin123` | Secret for Basic Auth requests to sandboxes |
 
@@ -99,7 +103,8 @@ docker run -d \
   -e KAFKA_BROKERS=host.docker.internal:9094 \
   -e REDIS_URL=redis://host.docker.internal:6379/0 \
   -e DATABASE_URL=postgresql://postgres:1@host.docker.internal:5432/aegis \
-  -e DASHSCOPE_API_KEY="your-api-key" \
+  -e LLM_PROVIDER=bedrock \
+  -e BEDROCK_MODEL_ID=qwen.qwen3-coder-next \
   --name aegis-soar-engine-service \
   aegis-soar-engine
 ```

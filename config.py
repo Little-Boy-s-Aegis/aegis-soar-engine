@@ -54,11 +54,15 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")  # I-01 fix: no hardcoded credentia
 DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://dashboard-backend:8082/api")
 AEGIS_INTERNAL_TOKEN = os.getenv("AEGIS_INTERNAL_TOKEN", "")  # I-01 fix: no hardcoded fallback
 
-# Qwen 3.7 Plus LLM Config
+# LLM Config
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "dashscope").strip().lower()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 QWEN_MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "qwen3-plus")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "qwen.qwen3-coder-next")
+BEDROCK_REGION = os.getenv("BEDROCK_REGION", os.getenv("AWS_REGION", "us-east-1"))
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "10"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
 LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
 
 # SOC Settings

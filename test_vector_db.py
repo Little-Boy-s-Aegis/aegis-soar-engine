@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -15,11 +16,28 @@ class TestVectorDBIntegration(unittest.TestCase):
     def test_mock_embedding_generation(self):
         """Verify that get_qwen_embedding generates mock vectors when no API key is set."""
         # When DASHSCOPE_API_KEY is empty/missing
-        emb = get_qwen_embedding("test query string", api_key="")
+        with patch.dict(os.environ, {"EMBEDDING_PROVIDER": "mock"}):
+            emb = get_qwen_embedding("test query string", api_key="")
         self.assertEqual(len(emb), 1024)
         # Unit vector check: sum of squares should be very close to 1.0
         sum_sq = sum(x*x for x in emb)
         self.assertAlmostEqual(sum_sq, 1.0, places=5)
+
+    @patch("embedding_provider._bedrock_client")
+    def test_bedrock_embedding_generation(self, mock_bedrock_client):
+        """Verify Bedrock embedding responses are accepted for Qdrant ingestion."""
+        body = MagicMock()
+        body.read.return_value = json.dumps({"embedding": [0.1] * 1024}).encode("utf-8")
+        mock_bedrock_client.return_value.invoke_model.return_value = {"body": body}
+
+        with patch.dict(os.environ, {
+            "EMBEDDING_PROVIDER": "bedrock",
+            "BEDROCK_EMBEDDING_DIMENSIONS": "1024",
+        }):
+            emb = get_qwen_embedding("bedrock embedding test", api_key="")
+
+        self.assertEqual(len(emb), 1024)
+        mock_bedrock_client.return_value.invoke_model.assert_called_once()
 
     def test_ensure_collection_fallback(self):
         """Verify that ensure_collection returns False/handles connection error when Qdrant is offline."""
@@ -80,6 +98,18 @@ class TestVectorDBIntegration(unittest.TestCase):
             res = orch._query_vector_db_playbooks("threat scenario")
             self.assertIn("Playbook: PB-WEB-EDGE", res)
             self.assertIn("Web Server Edge Containment", res)
+
+    def test_bedrock_qwen_response_extraction(self):
+        """Verify Bedrock Runtime response bodies can be normalized to raw JSON text."""
+        orch = SoarOrchestrator.__new__(SoarOrchestrator)
+        raw = orch._extract_bedrock_text({
+            "output": {
+                "message": {
+                    "content": [{"text": "{\"decision\":{\"final\":\"manual_review\"}}"}]
+                }
+            }
+        })
+        self.assertIn("manual_review", raw)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,11 +1,10 @@
 import os
 import json
 import hashlib
-import random
-import math
 import logging
 import requests
 from urllib.parse import urlparse
+from embedding_provider import get_text_embedding
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ingest-vector-db")
@@ -16,7 +15,7 @@ OPENSEARCH_L1_INDEX = os.getenv("OPENSEARCH_L1_INDEX", "l1-threat-intel")
 OPENSEARCH_L2_INDEX = os.getenv("OPENSEARCH_L2_INDEX", "l2-playbooks")
 VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "").strip().lower()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+VECTOR_EMBEDDING_DIMENSIONS = int(os.getenv("BEDROCK_EMBEDDING_DIMENSIONS", os.getenv("VECTOR_EMBEDDING_DIMENSIONS", "1024")))
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -138,39 +137,9 @@ def aws_signed_request(method, url, body=None, service=None, timeout=10):
     SigV4Auth(credentials.get_frozen_credentials(), service or os.getenv("OPENSEARCH_SERVICE", inferred_service), region).add_auth(request)
     return requests.request(method, url, data=payload, headers=dict(request.headers), timeout=timeout)
 
-def stable_text_seed(text):
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big")
-
 def get_qwen_embedding(text, api_key):
-    """Generates embedding using Qwen API, falling back to a deterministic mock vector if offline/mock."""
-    if not api_key or api_key.startswith("mock") or api_key == "":
-        # Generate stable pseudo-random mock embedding (unit length) based on text hash
-        text_hash = stable_text_seed(text)
-        random.seed(text_hash)
-        vector = [random.uniform(-1.0, 1.0) for _ in range(1024)]
-        norm = math.sqrt(sum(x * x for x in vector))
-        return [x / norm for x in vector]
-
-    url = f"{QWEN_BASE_URL}/embeddings"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "text-embedding-v3",
-        "input": text
-    }
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=15)
-        resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
-    except Exception as e:
-        logger.warning(f"Failed to fetch real Qwen embedding ({e}). Falling back to mock vector.")
-        random.seed(stable_text_seed(text))
-        vector = [random.uniform(-1.0, 1.0) for _ in range(1024)]
-        norm = math.sqrt(sum(x * x for x in vector))
-        return [x / norm for x in vector]
+    """Generates an embedding using the configured provider, falling back to a deterministic vector."""
+    return get_text_embedding(text, dashscope_api_key=api_key)
 
 def ensure_collection(collection_name):
     """Creates Qdrant collection if it doesn't exist."""
@@ -186,7 +155,7 @@ def ensure_collection(collection_name):
     # Create it
     create_payload = {
         "vectors": {
-            "size": 1024,
+            "size": VECTOR_EMBEDDING_DIMENSIONS,
             "distance": "Cosine"
         }
     }
@@ -223,7 +192,7 @@ def ensure_opensearch_index(index_name):
             "properties": {
                 "embedding": {
                     "type": "knn_vector",
-                    "dimension": 1024
+                    "dimension": VECTOR_EMBEDDING_DIMENSIONS
                 },
                 "payload": {
                     "type": "object",
