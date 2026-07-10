@@ -288,7 +288,7 @@ class L2OutputAndNotification(BaseModel):
 class L2SocFeedbackControls(BaseModel):
     allowed_actions: List[str]
     callback_required: bool = True
-    callback_channel: str = "api_call"
+    callback_channel: Optional[str] = "api_call"
 
 
 class L2AuditEvent(BaseModel):

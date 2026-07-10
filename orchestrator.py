@@ -637,7 +637,11 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
                 logger.info("Successfully received response from Qwen Orchestrator.")
                 
                 # Parse and validate response
-                decision_dict = json.loads(raw_response)
+                try:
+                    decision_dict = json.loads(raw_response)
+                except Exception as je:
+                    logger.error(f"RAW LLM RESPONSE THAT FAILED TO PARSE (length={len(raw_response)}): {raw_response}")
+                    raise je
                 
                 # Strip markdown codeblocks if LLM returned them inside JSON or string format
                 if isinstance(decision_dict, str):
