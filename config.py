@@ -67,8 +67,8 @@ LLM_ENABLED = os.getenv("LLM_ENABLED", "true").lower() == "true"
 
 # SOC Settings
 SOC_AUTOPILOT_ENABLED = os.getenv("SOC_AUTOPILOT_ENABLED", "false").lower() == "true"
-DEFAULT_EXECUTION_WINDOW_START = os.getenv("EXECUTION_WINDOW_START", "08:00")
-DEFAULT_EXECUTION_WINDOW_END = os.getenv("EXECUTION_WINDOW_END", "20:00")
+DEFAULT_EXECUTION_WINDOW_START = os.getenv("EXECUTION_WINDOW_START", "00:00")
+DEFAULT_EXECUTION_WINDOW_END = os.getenv("EXECUTION_WINDOW_END", "23:59")
 DEFAULT_TIMEZONE = os.getenv("EXECUTION_TIMEZONE", "Asia/Ho_Chi_Minh")
 
 # Path to offline files (mounted from agent-layer-2 directory)

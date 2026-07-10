@@ -919,7 +919,31 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
         execution_window.setdefault("timezone", DEFAULT_TIMEZONE)
         execution_window.setdefault("start_local", DEFAULT_EXECUTION_WINDOW_START)
         execution_window.setdefault("end_local", DEFAULT_EXECUTION_WINDOW_END)
-        execution_window.setdefault("in_window", False)
+        
+        in_window = False
+        try:
+            import pytz
+            tz_name = execution_window.get("timezone", DEFAULT_TIMEZONE)
+            tz = pytz.timezone(tz_name)
+            now_local = datetime.now(tz)
+            
+            start_str = execution_window.get("start_local", DEFAULT_EXECUTION_WINDOW_START)
+            end_str = execution_window.get("end_local", DEFAULT_EXECUTION_WINDOW_END)
+            
+            start_time = datetime.strptime(start_str.strip(), "%H:%M").time()
+            end_time = datetime.strptime(end_str.strip(), "%H:%M").time()
+            current_time = now_local.time()
+            
+            if start_time <= end_time:
+                in_window = start_time <= current_time <= end_time
+            else:
+                in_window = current_time >= start_time or current_time <= end_time
+            logger.info(f"[WINDOW] Local time check: current={current_time}, range={start_time}-{end_time}, timezone={tz_name} -> in_window={in_window}")
+        except Exception as e:
+            logger.warning(f"Failed to dynamically calculate execution window: {e}")
+            in_window = True
+            
+        execution_window.setdefault("in_window", in_window)
         execution_window.setdefault("outside_window_behavior", "suggest_only_and_report")
         
         autopilot_enabled = SOC_AUTOPILOT_ENABLED
