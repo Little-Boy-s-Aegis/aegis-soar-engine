@@ -28,7 +28,7 @@ logger = logging.getLogger("soar-engine.orchestrator")
 
 L2_SCHEMA_VERSION = "littleboy.soc.layer2.orchestrator_decision.v8"
 L1_SCHEMA_VERSION = "littleboy.soc.layer1.agent_finding.v4"
-RISK_FLOOR_THRESHOLD = 6.0
+RISK_FLOOR_THRESHOLD = 5.0
 
 
 def _utc_now() -> str:
