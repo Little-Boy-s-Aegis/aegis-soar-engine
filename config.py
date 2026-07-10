@@ -51,7 +51,7 @@ ACTION_EXECUTION_DELAY_SECONDS = float(os.getenv("ACTION_EXECUTION_DELAY_SECONDS
 DATABASE_URL = os.getenv("DATABASE_URL", "")  # I-01 fix: no hardcoded credentials fallback
 
 # Dashboard API Config
-DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://dashboard-backend:8082/api")
+DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://backend-api.ai-native-soc-hackathon.local:8080/api" if os.getenv("AWS_REGION") else "http://dashboard-backend:8082/api")
 AEGIS_INTERNAL_TOKEN = os.getenv("AEGIS_INTERNAL_TOKEN", "")  # I-01 fix: no hardcoded fallback
 
 # LLM Config

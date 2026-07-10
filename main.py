@@ -129,32 +129,79 @@ class SoarEngineApp:
         logger.info(f"Kafka Brokers: {KAFKA_BROKERS}")
         logger.info(f"Autopilot Mode: {'ENABLED' if SOC_AUTOPILOT_ENABLED else 'DISABLED'}")
 
-        # Initialize producer
-        for attempt in range(5):
-            try:
-                self.producer = KafkaProducer(
-                    bootstrap_servers=KAFKA_BROKERS,
-                    value_serializer=lambda v: json.dumps(v).encode("utf-8")
-                )
-                logger.info("Producer connected to Kafka brokers successfully.")
-                break
-            except Exception as e:
-                logger.warning(f"Failed to connect producer to Kafka (attempt {attempt+1}/5): {e}")
-                time.sleep(3)
+        action_queue_url = os.getenv("ACTION_QUEUE_URL")
 
-        if not self.producer:
-            logger.error("Could not initialize Kafka producer.")
-            if os.getenv("SOAR_IDLE_WITHOUT_KAFKA", "true").strip().lower() in {"1", "true", "yes", "on"}:
-                logger.warning("Kafka is unavailable; keeping service alive in idle mode for AWS hackathon deployment.")
-                while True:
-                    time.sleep(60)
-            return
+        if not action_queue_url:
+            # Initialize producer
+            for attempt in range(5):
+                try:
+                    self.producer = KafkaProducer(
+                        bootstrap_servers=KAFKA_BROKERS,
+                        value_serializer=lambda v: json.dumps(v).encode("utf-8")
+                    )
+                    logger.info("Producer connected to Kafka brokers successfully.")
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to connect producer to Kafka (attempt {attempt+1}/5): {e}")
+                    time.sleep(3)
+
+            if not self.producer:
+                logger.error("Could not initialize Kafka producer.")
+                if os.getenv("SOAR_IDLE_WITHOUT_KAFKA", "true").strip().lower() in {"1", "true", "yes", "on"}:
+                    logger.warning("Kafka is unavailable; keeping service alive in idle mode for AWS hackathon deployment.")
+                    while True:
+                        time.sleep(60)
+                return
+        else:
+            logger.info("Running in SQS Mode. Skipping Kafka producer initialization.")
 
         # Start consumer loop
         self.consume_loop()
 
     def consume_loop(self):
-        """Runs the main Kafka consumer loop."""
+        """Runs the main consumer loop (supports SQS or Kafka)."""
+        action_queue_url = os.getenv("ACTION_QUEUE_URL")
+        aws_region = os.getenv("AWS_REGION", "ap-southeast-1")
+
+        if action_queue_url:
+            logger.info(f"[SQS MODE] Starting SQS consumer on queue: {action_queue_url}")
+            import boto3
+            sqs_client = boto3.client("sqs", region_name=aws_region)
+
+            while True:
+                # Check correlation buffer
+                self.check_correlation_buffer()
+
+                try:
+                    response = sqs_client.receive_message(
+                        QueueUrl=action_queue_url,
+                        MaxNumberOfMessages=10,
+                        WaitTimeSeconds=10
+                    )
+
+                    messages = response.get("Messages", [])
+                    for message in messages:
+                        receipt_handle = message["ReceiptHandle"]
+                        try:
+                            body = json.loads(message["Body"])
+                            # In SQS mode, the body is either a SOAR_FAST_PATH event or an L1 finding envelope
+                            if body.get("event_type") == "SOAR_FAST_PATH":
+                                self.process_fast_path(body)
+                            else:
+                                self.buffer_l1_finding(body)
+
+                            sqs_client.delete_message(
+                                QueueUrl=action_queue_url,
+                                ReceiptHandle=receipt_handle
+                            )
+                        except Exception as msg_err:
+                            logger.error(f"[SQS ERROR] Failed to process action queue message: {msg_err}")
+                except Exception as sqs_err:
+                    logger.error(f"[SQS ERROR] Polling exception: {sqs_err}")
+                    time.sleep(5)
+            return
+
+        # Fallback to Kafka consumer loop
         consumer = None
         for attempt in range(5):
             try:
@@ -183,23 +230,23 @@ class SoarEngineApp:
         while True:
             # Check if any correlated groups are ready to be processed
             self.check_correlation_buffer()
-            
+
             # Poll messages with a short timeout
             message_pack = consumer.poll(timeout_ms=500)
-            
+
             for tp, messages in message_pack.items():
                 for msg in messages:
                     try:
                         raw_data = json.loads(msg.value.decode("utf-8"))
                         topic = msg.topic
-                        
+
                         if topic == SOAR_FAST_PATH_TOPIC:
                             # Stage 2 bypass: Process obvious WAF/APIGW attacks immediately
                             self.process_fast_path(raw_data)
                         elif topic == L1_FINDINGS_TOPIC:
                             # Stage 1 schema validation + buffer correlation
                             self.buffer_l1_finding(raw_data)
-                            
+
                     except Exception as e:
                         logger.error(f"Error handling message from topic {msg.topic}: {e}")
 
@@ -272,8 +319,9 @@ class SoarEngineApp:
             "description": f"Source IP was auto-blocked for {attack_type}.",
             "sourceService": f"Fast-Path:{data.get('facility', 'WAF')}"
         }
-        self.producer.send(DASHBOARD_EVENTS_TOPIC, event_payload)
-        self.producer.flush()
+        if self.producer:
+            self.producer.send(DASHBOARD_EVENTS_TOPIC, event_payload)
+            self.producer.flush()
 
     def buffer_l1_finding(self, data: dict):
         """Validates L1 schema and groups findings in a sliding window."""
@@ -380,12 +428,15 @@ class SoarEngineApp:
                 self.redis.expire(redis_key, 7 * 24 * 3600)
                 logger.info(f"[REDIS STATE] Initialized status for playbook {playbook_id} on incident {incident_id}")
 
-            logger.info(f"[ORCHESTRATOR] Publishing L2 Orchestrator Decision to topic {SOAR_DECISIONS_TOPIC}")
-            self.producer.send(SOAR_DECISIONS_TOPIC, decision)
-            self.producer.flush()
-            logger.info(f"[ORCHESTRATOR] Successfully published decision for incident: {decision['input_summary'].get('incident_id')}")
+            if self.producer:
+                logger.info(f"[ORCHESTRATOR] Publishing L2 Orchestrator Decision to topic {SOAR_DECISIONS_TOPIC}")
+                self.producer.send(SOAR_DECISIONS_TOPIC, decision)
+                self.producer.flush()
+                logger.info(f"[ORCHESTRATOR] Successfully published decision for incident: {decision['input_summary'].get('incident_id')}")
+            else:
+                logger.info(f"[ORCHESTRATOR] SQS Mode active. Decision for incident {decision['input_summary'].get('incident_id')} recorded locally.")
         except Exception as pe:
-            logger.error(f"[ORCHESTRATOR] Failed to publish decision to Kafka: {pe}")
+            logger.error(f"[ORCHESTRATOR] Failed to record/publish decision: {pe}")
 
 
 if __name__ == "__main__":
