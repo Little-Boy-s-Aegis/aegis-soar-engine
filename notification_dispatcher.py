@@ -427,6 +427,18 @@ class NotificationDispatcher:
             if not ok:
                 failures.append(f"mqtt: {msg}")
 
+        # Email – HIGH and above
+        if severity in ("CRITICAL", "HIGH") and self._is_enabled("email"):
+            ok, msg = self._safe_dispatch(
+                "Email",
+                self.email.send,
+                f"[{severity}] {title}",
+                message,
+            )
+            channels_used.append("email")
+            if not ok:
+                failures.append(f"email: {msg}")
+
         logger.info(
             f"[NOTIFY] Immediate alert dispatched (severity={severity}). "
             f"Channels={channels_used}. Failures={failures or 'none'}."

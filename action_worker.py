@@ -76,6 +76,15 @@ class SoarActionWorker:
             logger.error(f"Failed to initialize AWS WAF Connector: {we}")
             self.waf = None
 
+        # Initialize Email Connector
+        try:
+            from connectors.email_connector import EmailConnector
+            self.email = EmailConnector()
+            logger.info("Email Connector initialized successfully.")
+        except Exception as ee:
+            logger.error(f"Failed to initialize Email Connector: {ee}")
+            self.email = None
+
         # Initialize Rate Limiter
         try:
             from rate_limiter import RedisTokenBucketRateLimiter
@@ -371,6 +380,23 @@ class SoarActionWorker:
                                 from audit_logger import SoarAuditLogger
                                 SoarAuditLogger.log_api_response(incident_id, "aws_waf", action_type, {"target": target_value, "pattern": url_pattern}, waf_success, waf_msg)
 
+                        # Trigger Email Connector for SOC notification
+                        if self.email and action_type == "notify_soc":
+                            subject = f"[SOAR ALERT] Notify SOC: Incident {incident_id}"
+                            body_html = self.email._build_html_template(
+                                title=f"SOC Notification - Incident {incident_id}",
+                                content=f"<p><strong>Rationale:</strong> {action.get('rationale', 'No rationale provided')}</p>"
+                                        f"<p><strong>Target:</strong> {target_value}</p>",
+                                severity="high"
+                            )
+                            email_success, email_msg = self.email.send_alert_email(subject, body_html)
+                            if email_success:
+                                action["rationale"] = f"{action.get('rationale', '')} | Email Sent: {email_msg}"
+                            else:
+                                action["rationale"] = f"{action.get('rationale', '')} | Email Failed: {email_msg}"
+                            from audit_logger import SoarAuditLogger
+                            SoarAuditLogger.log_api_response(incident_id, "email", "send_alert_email", {"target": target_value}, email_success, email_msg)
+
                         dashboard_action_type = self.executor._map_action_type(action_type)
                         
                         # 1. Retry Loop
@@ -603,6 +629,20 @@ class SoarActionWorker:
                 target=action.get('target', {}).get('value_masked', "unknown"),
                 message=f"P0 EMERGENCY ALERT: Guardrail violation blocked. Reason: {reason}"
             )
+
+            # Send Email alert for P0 Emergency
+            if self.email:
+                subject = f"[P0 EMERGENCY] Guardrail Violation on Incident {incident_id}"
+                body_html = self.email._build_html_template(
+                    title="P0 EMERGENCY ALERT",
+                    content=f"<p>A critical safety guardrail was violated. An unsafe action was blocked.</p>"
+                            f"<p><strong>Incident ID:</strong> {incident_id}</p>"
+                            f"<p><strong>Action Type:</strong> {action.get('action_type')}</p>"
+                            f"<p><strong>Target:</strong> {action.get('target', {}).get('value_masked')}</p>"
+                            f"<p><strong>Reason Blocked:</strong> {reason}</p>",
+                    severity="critical"
+                )
+                self.email.send_alert_email(subject, body_html)
         except Exception as e:
             logger.error(f"Failed to publish P0 Alert: {e}")
 
