@@ -917,8 +917,23 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
         execution_window.setdefault("end_local", DEFAULT_EXECUTION_WINDOW_END)
         execution_window.setdefault("in_window", False)
         execution_window.setdefault("outside_window_behavior", "suggest_only_and_report")
-        automation.setdefault("soc_autopilot_enabled", SOC_AUTOPILOT_ENABLED)
-        automation.setdefault("mode", "execute" if SOC_AUTOPILOT_ENABLED else "suggest_only")
+        
+        autopilot_enabled = SOC_AUTOPILOT_ENABLED
+        try:
+            from config import DATABASE_URL
+            import psycopg2
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT value FROM system_settings WHERE key = 'soc_autopilot_enabled'")
+                row = cursor.fetchone()
+                if row:
+                    autopilot_enabled = (row[0].strip().lower() == "true")
+            conn.close()
+        except Exception as dbe:
+            logger.warning(f"Failed to fetch dynamic autopilot setting from PostgreSQL: {dbe}")
+
+        automation.setdefault("soc_autopilot_enabled", autopilot_enabled)
+        automation.setdefault("mode", "execute" if autopilot_enabled else "suggest_only")
         automation.setdefault("default_mode", "suggest_only")
         automation.setdefault("auto_containment_path", "l2_verified" if verified_case.get("threat_confirmed") else "none")
         automation.setdefault("next_review_minutes", 60)
