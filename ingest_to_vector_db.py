@@ -13,6 +13,8 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OPENSEARCH_ENDPOINT = os.getenv("OPENSEARCH_ENDPOINT", "").rstrip("/")
 OPENSEARCH_L1_INDEX = os.getenv("OPENSEARCH_L1_INDEX", "l1-threat-intel")
 OPENSEARCH_L2_INDEX = os.getenv("OPENSEARCH_L2_INDEX", "l2-playbooks")
+QDRANT_L1_COLLECTION = os.getenv("QDRANT_L1_COLLECTION", OPENSEARCH_L1_INDEX)
+QDRANT_L2_COLLECTION = os.getenv("QDRANT_L2_COLLECTION", OPENSEARCH_L2_INDEX)
 VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "").strip().lower()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 VECTOR_EMBEDDING_DIMENSIONS = int(os.getenv("BEDROCK_EMBEDDING_DIMENSIONS", os.getenv("VECTOR_EMBEDDING_DIMENSIONS", "1024")))
@@ -398,7 +400,7 @@ def ingest_l1_threat_intel():
     if provider == "opensearch":
         if not ensure_opensearch_index(OPENSEARCH_L1_INDEX):
             return
-    elif not ensure_collection("l1_threat_intel"):
+    elif not ensure_collection(QDRANT_L1_COLLECTION):
         return
 
     logger.info(f"Parsing Layer 1 per-agent references from: {L1_DIR}")
@@ -415,7 +417,7 @@ def ingest_l1_threat_intel():
     batch_size = 50
     for i in range(0, len(points), batch_size):
         batch = points[i:i + batch_size]
-        url = qdrant_api("/collections/l1_threat_intel/points")
+        url = qdrant_api(f"/collections/{QDRANT_L1_COLLECTION}/points")
         try:
             resp = requests.put(url, json={"points": batch}, timeout=10)
             resp.raise_for_status()
@@ -431,7 +433,7 @@ def ingest_l2_playbooks():
     if provider == "opensearch":
         if not ensure_opensearch_index(OPENSEARCH_L2_INDEX):
             return
-    elif not ensure_collection("l2_playbooks"):
+    elif not ensure_collection(QDRANT_L2_COLLECTION):
         return
 
     points = []
@@ -479,7 +481,7 @@ def ingest_l2_playbooks():
             logger.info(f"L2 Playbooks OpenSearch ingestion complete. Total playbooks: {len(points)}")
             return
 
-        url = qdrant_api("/collections/l2_playbooks/points")
+        url = qdrant_api(f"/collections/{QDRANT_L2_COLLECTION}/points")
         try:
             resp = requests.put(url, json={"points": points}, timeout=10)
             resp.raise_for_status()

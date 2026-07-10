@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -142,7 +143,11 @@ class SoarEngineApp:
                 time.sleep(3)
 
         if not self.producer:
-            logger.error("Could not initialize Kafka producer. Exiting.")
+            logger.error("Could not initialize Kafka producer.")
+            if os.getenv("SOAR_IDLE_WITHOUT_KAFKA", "true").strip().lower() in {"1", "true", "yes", "on"}:
+                logger.warning("Kafka is unavailable; keeping service alive in idle mode for AWS hackathon deployment.")
+                while True:
+                    time.sleep(60)
             return
 
         # Start consumer loop
@@ -167,7 +172,11 @@ class SoarEngineApp:
                 time.sleep(3)
 
         if not consumer:
-            logger.error("Could not initialize Kafka consumer. Exiting.")
+            logger.error("Could not initialize Kafka consumer.")
+            if os.getenv("SOAR_IDLE_WITHOUT_KAFKA", "true").strip().lower() in {"1", "true", "yes", "on"}:
+                logger.warning("Kafka consumer unavailable; keeping service alive in idle mode for AWS hackathon deployment.")
+                while True:
+                    time.sleep(60)
             return
 
         # Poll loop with correlation buffer check
