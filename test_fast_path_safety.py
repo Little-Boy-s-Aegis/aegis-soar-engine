@@ -21,7 +21,10 @@ class TestFastPathSafety(unittest.TestCase):
         app.policy_evaluator = MagicMock()
         
         # Deny the fast-path action (e.g. whitelist violation)
-        app.policy_evaluator.is_action_allowed.return_value = (False, "WHITELIST SECURITY VIOLATION: Denied block_ip on protected resource: 10.0.0.1")
+        app.policy_evaluator.authorize.return_value = {
+            "allow": False, "reasons": ["protected_target"], "intent": {},
+            "intent_hash": "hash", "policy_revision": "aegis-autopilot-v1"
+        }
         
         data = {
             "source_ip": "10.0.0.1",
@@ -47,7 +50,11 @@ class TestFastPathSafety(unittest.TestCase):
         app.rate_limiter = MagicMock()
         
         # Allowed by OPA
-        app.policy_evaluator.is_action_allowed.return_value = (True, "Allowed")
+        app.policy_evaluator.authorize.return_value = {
+            "allow": True, "reasons": ["allowed"], "intent": {},
+            "intent_hash": "hash", "policy_revision": "aegis-autopilot-v1"
+        }
+        app.policy_evaluator.verify_authorization.return_value = True
         # Denied by rate limiter (timeout)
         app.rate_limiter.acquire_token.return_value = False
         
@@ -75,7 +82,11 @@ class TestFastPathSafety(unittest.TestCase):
         app.rate_limiter = MagicMock()
         
         # Allowed by OPA
-        app.policy_evaluator.is_action_allowed.return_value = (True, "Allowed")
+        app.policy_evaluator.authorize.return_value = {
+            "allow": True, "reasons": ["allowed"], "intent": {},
+            "intent_hash": "hash", "policy_revision": "aegis-autopilot-v1"
+        }
+        app.policy_evaluator.verify_authorization.return_value = True
         # Allowed by rate limiter
         app.rate_limiter.acquire_token.return_value = True
         

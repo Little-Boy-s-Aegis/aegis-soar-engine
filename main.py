@@ -19,7 +19,7 @@ from orchestrator import SoarOrchestrator
 from playbook_executor import PlaybookExecutor
 from policy_evaluator import OpaPolicyEvaluator
 from rate_limiter import RedisTokenBucketRateLimiter
-from safety_gate import evaluate_action_safety, acquire_action_rate_limits
+from safety_gate import evaluate_action_safety, acquire_action_rate_limits, verify_action_authorization
 
 # Setup logging
 logging.basicConfig(
@@ -315,14 +315,25 @@ class SoarEngineApp:
             "status": "pending"
         }
         decision_context = {
+            "input_summary": {"incident_id": data.get("incident_id") or action["action_id"]},
             "scoring": {"final_risk_score_0_10": 10.0},
-            "verified_case": {"title": f"Fast-Path {attack_type}"}
+            "verified_case": {"title": f"Fast-Path {attack_type}"},
+            "automation_control": {
+                "soc_autopilot_enabled": True,
+                "auto_containment_eligible": True,
+                "execution_window": {"in_window": True},
+            },
+            "l2_independent_verification": {"data_fresh": True},
         }
 
         # Check safety policy via evaluate_action_safety
         allowed, reason = evaluate_action_safety(self.policy_evaluator, action, decision_context)
         if not allowed:
             logger.error(f"[FAST-PATH SAFETY GATE BLOCKED] {recommended_action} on {source_ip}: {reason}")
+            return
+        verified, verify_reason = verify_action_authorization(self.policy_evaluator, action, decision_context)
+        if not verified:
+            logger.critical(f"[FAST-PATH OPA TOCTOU BLOCKED] {recommended_action} on {source_ip}: {verify_reason}")
             return
 
         # Check rate limits via acquire_action_rate_limits

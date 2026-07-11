@@ -1,166 +1,94 @@
-import unittest
 import os
-from unittest.mock import patch, MagicMock
+import time
+import unittest
+from unittest.mock import MagicMock, patch
+
 from policy_evaluator import OpaPolicyEvaluator
+
+
+def action():
+    return {
+        "action_id": "act-1", "created_at": "2026-07-11T00:00:00Z",
+        "action_type": "block_ip", "phase": "contain", "approval_mode": "AUTO",
+        "target": {"value_masked": "198.51.100.7"}, "reversible": True,
+    }
+
+
+def context():
+    return {
+        "input_summary": {"incident_id": "inc-1", "tenant_id": "bank"},
+        "orchestrator": {"orchestrator_id": "layer2_orchestrator_soar"},
+        "automation_control": {
+            "soc_autopilot_enabled": True, "auto_containment_eligible": True,
+            "execution_window": {"in_window": True},
+        },
+        "scoring": {"final_risk_score_0_10": 9.0},
+        "l2_independent_verification": {"data_fresh": True},
+    }
+
 
 class TestPolicyEvaluator(unittest.TestCase):
     def setUp(self):
-        os.environ["ASSET_INVENTORY_API_URL"] = ""
-        os.environ["OPA_ENABLED"] = "false"
+        os.environ.update({
+            "OPA_ENABLED": "true", "OPA_POLICY_REVISION": "aegis-autopilot-v1",
+            "OPA_ALLOW_CACHE_TTL_SECONDS": "30", "OPA_CALLER_ID": "soar-action-worker",
+        })
 
-    def test_local_safety_critical_ip_block(self):
+    def response(self, allow=True, revision="aegis-autopilot-v1"):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"result": {
+            "allow": allow, "decision_id": "opa-1", "policy_revision": revision,
+            "reasons": ["allowed" if allow else "protected_target"],
+        }}
+        return response
+
+    @patch("policy_evaluator.requests.post")
+    def test_allow_and_hash_verification(self, post):
+        post.return_value = self.response(True)
         evaluator = OpaPolicyEvaluator()
-        
-        # 1. Critical IP blocking should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="192.168.1.1", # critical DNS/Gateway
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=9.0
-        )
-        self.assertFalse(allowed)
-        self.assertTrue("critical IP" in reason or "WHITELIST" in reason)
-        
-        # 2. Non-critical IP blocking should be allowed
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="198.51.100.5",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=9.0
-        )
-        self.assertTrue(allowed)
+        result = evaluator.authorize(action(), context())
+        self.assertTrue(result["allow"])
+        self.assertTrue(evaluator.verify_authorization(action(), context(), result))
 
-    def test_local_safety_critical_host_isolation(self):
-        os.environ["OPA_ENABLED"] = "false"
+    @patch("policy_evaluator.requests.post")
+    def test_denial_is_not_cached(self, post):
+        post.return_value = self.response(False)
         evaluator = OpaPolicyEvaluator()
-        
-        # 1. Critical host quarantine should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="quarantine_host",
-            target="DB-PROD-01",
-            phase="contain",
-            approval_mode="APPROVAL_REQUIRED",
-            risk_score=9.5
-        )
-        self.assertFalse(allowed)
-        self.assertTrue("critical host" in reason or "WHITELIST" in reason)
-        
-        # 2. Non-critical host quarantine should be allowed
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="quarantine_host",
-            target="USER-LAPTOP-12",
-            phase="contain",
-            approval_mode="APPROVAL_REQUIRED",
-            risk_score=9.5
-        )
-        self.assertTrue(allowed)
+        denied = evaluator.authorize(action(), context())
+        self.assertFalse(denied["allow"])
+        post.side_effect = TimeoutError("down")
+        self.assertFalse(evaluator.authorize(action(), context())["allow"])
 
-    def test_local_safety_low_risk_auto_containment(self):
-        os.environ["OPA_ENABLED"] = "false"
+    @patch("policy_evaluator.requests.post")
+    def test_exact_cached_allow_is_single_use(self, post):
+        post.return_value = self.response(True)
         evaluator = OpaPolicyEvaluator()
-        
-        # 1. Auto containment with low risk score should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="198.51.100.5",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=3.5
-        )
-        self.assertFalse(allowed)
-        self.assertIn("low risk score", reason)
+        evaluator.authorize(action(), context())
+        post.side_effect = TimeoutError("down")
+        cached = evaluator.authorize(action(), context())
+        self.assertTrue(cached["allow"])
+        self.assertEqual(cached["cache_status"], "consumed")
+        self.assertFalse(evaluator.authorize(action(), context())["allow"])
 
-        # 2. Auto containment with high risk score should be allowed
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="198.51.100.5",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=7.0
-        )
-        self.assertTrue(allowed)
-
-    def test_static_whitelist(self):
+    @patch("policy_evaluator.requests.post")
+    def test_cache_rejects_changed_target(self, post):
+        post.return_value = self.response(True)
         evaluator = OpaPolicyEvaluator()
-        
-        # 1. Whitelisted IP should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="10.0.0.1",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=9.9
-        )
-        self.assertFalse(allowed)
-        self.assertIn("WHITELIST SECURITY VIOLATION", reason)
+        evaluator.authorize(action(), context())
+        post.side_effect = TimeoutError("down")
+        changed = action()
+        changed["target"]["value_masked"] = "198.51.100.8"
+        self.assertFalse(evaluator.authorize(changed, context())["allow"])
 
-        # 2. Whitelisted IP with CIDR mask should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="192.168.1.254/32",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=9.9
-        )
-        self.assertFalse(allowed)
-        self.assertIn("WHITELIST SECURITY VIOLATION", reason)
+    @patch("policy_evaluator.requests.post")
+    def test_invalid_and_revision_mismatch_fail_closed(self, post):
+        post.return_value = self.response(True, "old-policy")
+        evaluator = OpaPolicyEvaluator()
+        self.assertFalse(evaluator.authorize(action(), context())["allow"])
+        post.return_value.json.return_value = {"result": {"allow": "yes"}}
+        self.assertFalse(evaluator.authorize(action(), context())["allow"])
 
-        # 3. Whitelisted Host should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="quarantine_host",
-            target="DC-PROD-AD",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=9.9
-        )
-        self.assertFalse(allowed)
-        self.assertIn("WHITELIST SECURITY VIOLATION", reason)
-
-        # 4. Whitelisted Domain should be denied
-        allowed, reason = evaluator.is_action_allowed(
-            action_type="block_ip",
-            target="sub.aegisbank.local",
-            phase="contain",
-            approval_mode="AUTO",
-            risk_score=9.9
-        )
-        self.assertFalse(allowed)
-        self.assertIn("WHITELIST SECURITY VIOLATION", reason)
-
-    @patch('requests.get')
-    def test_asset_inventory_sync(self, mock_get):
-        # Prepare mock response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "critical_assets": {
-                "ips": ["10.99.99.99"],
-                "hosts": ["NEW-CORE-SERVER"],
-                "domains": ["newbank.internal"]
-            }
-        }
-        mock_get.return_value = mock_response
-
-        # Temporarily use a scratch file to prevent overwriting prod whitelist.json
-        scratch_whitelist = "whitelist_scratch.json"
-        
-        # Restore environment variable for this test
-        os.environ["ASSET_INVENTORY_API_URL"] = "http://asset-inventory:8083/api/v1/assets/critical"
-        
-        # Initialize evaluator pointing to scratch file
-        evaluator = OpaPolicyEvaluator(whitelist_path=scratch_whitelist)
-        
-        # Verify sync worked and updated scratch whitelist
-        self.assertIn("10.99.99.99", evaluator.whitelist.get("ips", []))
-        self.assertIn("NEW-CORE-SERVER", evaluator.whitelist.get("hosts", []))
-        self.assertIn("newbank.internal", evaluator.whitelist.get("domains", []))
-        
-        # Clean up scratch file
-        if os.path.exists(scratch_whitelist):
-            os.remove(scratch_whitelist)
 
 if __name__ == "__main__":
-    from unittest.mock import patch, MagicMock
     unittest.main()

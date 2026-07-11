@@ -14,7 +14,7 @@ from config import (
     REDIS_URL
 )
 from playbook_executor import PlaybookExecutor
-from safety_gate import evaluate_action_safety, acquire_action_rate_limits
+from safety_gate import evaluate_action_safety, acquire_action_rate_limits, verify_action_authorization
 
 # Setup logging
 logging.basicConfig(
@@ -97,7 +97,7 @@ class SoarActionWorker:
         # Initialize OPA Policy Evaluator
         try:
             from policy_evaluator import OpaPolicyEvaluator
-            self.policy_evaluator = OpaPolicyEvaluator()
+            self.policy_evaluator = OpaPolicyEvaluator(redis_client=self.redis)
             logger.info("OPA Policy Evaluator client initialized successfully.")
         except Exception as oepa:
             logger.error(f"Failed to initialize OPA Policy Evaluator: {oepa}")
@@ -296,6 +296,12 @@ class SoarActionWorker:
                         action["status"] = "simulated"
                         action["rationale"] = f"{action.get('rationale', '')} | [DRY RUN] Simulated execution successfully."
                     else:
+                        verified, verify_reason = verify_action_authorization(self.policy_evaluator, action, decision)
+                        if not verified:
+                            logger.critical(f"[OPA TOCTOU BLOCKED] {action_type} on {target_value}: {verify_reason}")
+                            action["status"] = "failed"
+                            self.sync_execution_progress(decision, action, incident_id)
+                            continue
                         # Enforce Rate Limiting per target system via acquire_action_rate_limits helper
                         rate_allowed, rate_reason = acquire_action_rate_limits(self.rate_limiter, action, timeout_seconds=15.0)
                         if not rate_allowed:
@@ -416,6 +422,12 @@ class SoarActionWorker:
                             if attempt > 0:
                                 logger.info(f"[ACTION RETRY] Retrying {action_type} on {target_value} (Attempt {attempt+1}/{max_attempts}) in {delay_seconds}s...")
                                 time.sleep(delay_seconds)
+                                retry_allowed, retry_reason = evaluate_action_safety(self.policy_evaluator, action, decision)
+                                retry_verified, _ = verify_action_authorization(self.policy_evaluator, action, decision)
+                                if not retry_allowed or not retry_verified:
+                                    details = f"OPA denied retry: {retry_reason}"
+                                    logger.critical(f"[ACTION RETRY OPA BLOCKED] {details}")
+                                    break
                                 
                             success, details = self.executor._call_dashboard_perform_action(
                                 actor="SOAR Action Worker",
@@ -521,6 +533,13 @@ class SoarActionWorker:
             fallback_action["status"] = "failed"
             fallback_action["rationale"] = f"{fallback_action.get('rationale', '')} | Fallback Safety Gate Blocked: {reason}"
             self.trigger_p0_alert(incident_id, fallback_action, reason, decision)
+            self.sync_execution_progress(decision, fallback_action, incident_id)
+            return
+
+        verified, verify_reason = verify_action_authorization(self.policy_evaluator, fallback_action, decision)
+        if not verified:
+            logger.critical(f"[FALLBACK OPA TOCTOU BLOCKED] {fallback_action_type} on {target_value}: {verify_reason}")
+            fallback_action["status"] = "failed"
             self.sync_execution_progress(decision, fallback_action, incident_id)
             return
 

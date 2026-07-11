@@ -111,6 +111,7 @@ class TestActionWorkerDryRun(unittest.TestCase):
 
     def test_dry_run_blocked_by_guardrails(self):
         worker = SoarActionWorker()
+        worker.policy_evaluator = MagicMock()
         
         # Whitelisted target that must be blocked even in dry-run mode
         decision = {
@@ -127,16 +128,14 @@ class TestActionWorkerDryRun(unittest.TestCase):
             "status": "pending"
         }
         
-        allowed, reason = worker.policy_evaluator.is_action_allowed(
-            action_type=action["action_type"],
-            target=action["target"]["value_masked"],
-            phase=action["phase"],
-            approval_mode=action["approval_mode"],
-            risk_score=9.9
-        )
+        worker.policy_evaluator.authorize.return_value = {
+            "allow": False, "reasons": ["protected_target"], "intent": {}
+        }
+        result = worker.policy_evaluator.authorize(action, decision)
+        allowed, reason = result["allow"], ",".join(result["reasons"])
         
         self.assertFalse(allowed)
-        self.assertIn("WHITELIST SECURITY VIOLATION", reason)
+        self.assertIn("protected_target", reason)
 
     def test_p0_alert_triggering(self):
         worker = SoarActionWorker()

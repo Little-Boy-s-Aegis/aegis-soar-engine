@@ -176,6 +176,28 @@ class SoarAuditLogger:
         })
 
     @staticmethod
+    def log_policy_decision(incident_id: str, authorization: dict):
+        """Append the complete OPA enforcement outcome without secrets or raw evidence."""
+        intent = authorization.get("intent", {})
+        redacted = {
+            "request": intent.get("request", {}),
+            "execution": intent.get("execution", {}),
+            "action": intent.get("action", {}),
+            "evidence": intent.get("evidence", {}),
+            "guardrails": intent.get("guardrails", {}),
+        }
+        SoarAuditLogger.log_event("OPA_POLICY_DECISION", incident_id, {
+            "intentHash": authorization.get("intent_hash"),
+            "input": redacted,
+            "allow": authorization.get("allow", False),
+            "decisionId": authorization.get("decision_id"),
+            "policyRevision": authorization.get("policy_revision"),
+            "reasons": authorization.get("reasons", []),
+            "latencyMs": authorization.get("latency_ms"),
+            "cacheStatus": authorization.get("cache_status", "none"),
+        })
+
+    @staticmethod
     def log_api_response(incident_id: str, target_system: str, action_type: str, request_params: dict, success: bool, response_msg: str):
         """Logs API calls to firewalls, active directory, EDR, and WAF connectors."""
         SoarAuditLogger.log_event("API_CONNECTOR", incident_id, {

@@ -86,12 +86,17 @@ class PlaybookExecutor:
 
             if run_action:
                 # Apply safety gate checks
-                from safety_gate import evaluate_action_safety, acquire_action_rate_limits
+                from safety_gate import evaluate_action_safety, acquire_action_rate_limits, verify_action_authorization
                 allowed, reason = evaluate_action_safety(self.policy_evaluator, action, decision)
                 if not allowed:
                     logger.error(f"[LEGACY EXECUTOR SAFETY BLOCKED] {action_type} on {target_value}: {reason}")
                     action["status"] = "failed"
                     action["rationale"] = f"{action.get('rationale', '')} | Blocked by Safety Gate: {reason}"
+                    continue
+                verified, verify_reason = verify_action_authorization(self.policy_evaluator, action, decision)
+                if not verified:
+                    logger.critical(f"[OPA TOCTOU BLOCKED] {action_type} on {target_value}: {verify_reason}")
+                    action["status"] = "failed"
                     continue
 
                 is_dry_run = decision.get("dry_run", False)

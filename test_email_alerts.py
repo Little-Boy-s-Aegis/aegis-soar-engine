@@ -49,6 +49,12 @@ class TestEmailAlerts(unittest.TestCase):
         worker = SoarActionWorker()
         worker.dry_run = False
         worker.redis = None
+        worker.policy_evaluator = MagicMock()
+        worker.policy_evaluator.authorize.return_value = {
+            "allow": True, "reasons": ["allowed"], "intent": {},
+            "intent_hash": "hash", "policy_revision": "aegis-autopilot-v1"
+        }
+        worker.policy_evaluator.verify_authorization.return_value = True
         
         action = {
             "action_id": "act-test-notify",
@@ -64,7 +70,8 @@ class TestEmailAlerts(unittest.TestCase):
                 "soc_autopilot_enabled": True,
                 "execution_window": {"in_window": True},
                 "auto_containment_eligible": True
-            }
+            },
+            "scoring": {"final_risk_score_0_10": 9.0}
         }
         
         self.assertIsNotNone(worker.email)

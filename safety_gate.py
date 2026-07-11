@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger("soar-engine.safety-gate")
 
@@ -13,6 +14,11 @@ def evaluate_action_safety(policy_evaluator, action: dict, decision_context: dic
     phase = action.get("phase")
     approval_mode = action.get("approval_mode")
     risk_score = decision_context.get("scoring", {}).get("final_risk_score_0_10", 0.0)
+    autopilot_mode = bool(decision_context.get("automation_control", {}).get("soc_autopilot_enabled", False))
+
+    # Phase one changes Autopilot only; analyst/manual authorization remains unchanged.
+    if not autopilot_mode and approval_mode != "AUTO":
+        return True, "Manual action: Autopilot OPA gate not applicable"
 
     # In case target_value is missing
     if not target_value:
@@ -27,13 +33,19 @@ def evaluate_action_safety(policy_evaluator, action: dict, decision_context: dic
         return True, "Policy evaluator not available, but action is non-containment."
 
     try:
-        allowed, reason = policy_evaluator.is_action_allowed(
-            action_type=action_type,
-            target=target_value,
-            phase=phase,
-            approval_mode=approval_mode,
-            risk_score=risk_score
-        )
+        action.setdefault("_intent_created_at", datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+        authorization = policy_evaluator.authorize(action, decision_context)
+        action["_policy_authorization"] = {k: v for k, v in authorization.items() if k != "intent"}
+        try:
+            from audit_logger import SoarAuditLogger
+            SoarAuditLogger.log_policy_decision(
+                str(decision_context.get("input_summary", {}).get("incident_id") or "unknown"),
+                authorization,
+            )
+        except Exception as audit_error:
+            logger.error("[SAFETY GATE] Failed to persist policy audit: %s", audit_error)
+        allowed = authorization["allow"]
+        reason = ",".join(authorization["reasons"])
         return allowed, reason
     except Exception as e:
         logger.error(f"[SAFETY GATE] Exception in policy evaluation: {e}")
@@ -41,6 +53,15 @@ def evaluate_action_safety(policy_evaluator, action: dict, decision_context: dic
         if phase == "contain" or action_type in ("block_ip", "block_domain", "quarantine_host", "disable_account"):
             return False, f"FAIL-CLOSED: Policy evaluation failed with error: {e}"
         return True, f"Policy evaluation error ignored for non-containment: {e}"
+
+
+def verify_action_authorization(policy_evaluator, action: dict, decision_context: dict):
+    """TOCTOU guard called immediately before any connector side effect."""
+    authorization = action.get("_policy_authorization")
+    if not policy_evaluator or not policy_evaluator.verify_authorization(action, decision_context, authorization):
+        logger.critical("[SAFETY GATE] Action changed after authorization or has no valid OPA allow.")
+        return False, "OPA authorization hash verification failed"
+    return True, "OPA authorization hash verified"
 
 def acquire_action_rate_limits(rate_limiter, action: dict, timeout_seconds: float = 15.0):
     """

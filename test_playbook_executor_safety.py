@@ -21,7 +21,7 @@ class TestPlaybookExecutorSafety(unittest.TestCase):
         executor._push_l2_decision_to_gateway = MagicMock()
 
         # Deny by safety policy
-        executor.policy_evaluator.is_action_allowed.return_value = (False, "WHITELIST SECURITY VIOLATION: Denied block_ip on 10.0.0.1")
+        executor.policy_evaluator.authorize.return_value = {"allow": False, "reasons": ["protected_target"], "intent": {}}
 
         decision = {
             "input_summary": {"incident_id": "inc-legacy-01"},
@@ -58,7 +58,8 @@ class TestPlaybookExecutorSafety(unittest.TestCase):
         executor._push_l2_decision_to_gateway = MagicMock()
 
         # Allowed by safety policy, but rate limited (timeout)
-        executor.policy_evaluator.is_action_allowed.return_value = (True, "Allowed")
+        executor.policy_evaluator.authorize.return_value = {"allow": True, "reasons": ["allowed"], "intent": {}}
+        executor.policy_evaluator.verify_authorization.return_value = True
         executor.rate_limiter.acquire_token.return_value = False
 
         decision = {
@@ -97,7 +98,8 @@ class TestPlaybookExecutorSafety(unittest.TestCase):
         executor._push_l2_decision_to_gateway = MagicMock()
 
         # Allowed by policy and rate limiter
-        executor.policy_evaluator.is_action_allowed.return_value = (True, "Allowed")
+        executor.policy_evaluator.authorize.return_value = {"allow": True, "reasons": ["allowed"], "intent": {}}
+        executor.policy_evaluator.verify_authorization.return_value = True
         executor.rate_limiter.acquire_token.return_value = True
 
         decision = {
