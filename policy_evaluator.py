@@ -56,6 +56,13 @@ class OpaPolicyEvaluator:
             ip_clean = target.split("/")[0]
             if ip_clean in [ip.lower() for ip in self.whitelist.get("ips", [])]:
                 return True
+            try:
+                import ipaddress
+                ip_obj = ipaddress.ip_address(ip_clean)
+                if ip_obj.is_loopback or ip_obj.is_private:
+                    return True
+            except ValueError:
+                pass
                 
         # Check Hosts
         if action_type == "quarantine_host":

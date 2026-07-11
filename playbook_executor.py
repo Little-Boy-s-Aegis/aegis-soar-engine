@@ -75,14 +75,14 @@ class PlaybookExecutor:
             approval_mode = action.get("approval_mode")
 
             # Determine whether to run or suggest
-            if phase in ("preserve", "hunt", "notify") or approval_mode == "AUTO":
-                # Non-disruptive actions are always executed
+            if phase in ("preserve", "hunt", "notify"):
+                # Non-disruptive actions are always executed.
                 run_action = True
-            elif phase == "contain" and should_execute_containment:
-                # Containment executed only if gate passes
-                run_action = True
+            elif phase == "contain" or action_type in ("block_ip", "block_domain", "quarantine_host", "disable_account"):
+                # Containment executes only if the automation gates pass.
+                run_action = approval_mode == "AUTO" and should_execute_containment
             else:
-                run_action = False
+                run_action = approval_mode == "AUTO"
 
             if run_action:
                 # Apply safety gate checks

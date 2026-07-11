@@ -39,7 +39,14 @@ def _prepare_layer_artifacts_from_s3() -> str:
 LAYER_ARTIFACTS_LOCAL_DIR = _prepare_layer_artifacts_from_s3()
 
 # Kafka Config
-KAFKA_BROKERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-1:29092,kafka-2:29092,kafka-3:29092").split(",")
+def _csv_env(name: str) -> list[str]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+KAFKA_BROKERS = _csv_env("KAFKA_BOOTSTRAP_SERVERS") or _csv_env("KAFKA_BROKERS")
 L1_FINDINGS_TOPIC = os.getenv("L1_FINDINGS_TOPIC", "l1.agent.findings")
 SOAR_FAST_PATH_TOPIC = os.getenv("SOAR_FAST_PATH_TOPIC", "soar.actions.fast-path")
 DASHBOARD_EVENTS_TOPIC = os.getenv("DASHBOARD_EVENTS_TOPIC", "aegis.security.events")
@@ -48,7 +55,18 @@ SOAR_QUEUED_ACTIONS_TOPIC = os.getenv("SOAR_QUEUED_ACTIONS_TOPIC", "soar.actions
 ACTION_EXECUTION_DELAY_SECONDS = float(os.getenv("ACTION_EXECUTION_DELAY_SECONDS", "2.0"))
 
 # Database Config
-DATABASE_URL = os.getenv("DATABASE_URL", "")  # I-01 fix: no hardcoded credentials fallback
+db_user = os.getenv("DB_USER", "")
+db_password = os.getenv("DB_PASSWORD", "")
+db_host = os.getenv("DB_HOST", "")
+db_port = os.getenv("DB_PORT", "5432")
+db_name = os.getenv("DB_NAME", "")
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if not DATABASE_URL and db_host:
+    if db_password:
+        DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    else:
+        DATABASE_URL = f"postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
 
 # Dashboard API Config
 DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://backend-api.ai-native-soc-hackathon.local:8080/api" if os.getenv("AWS_REGION") else "http://dashboard-backend:8082/api")

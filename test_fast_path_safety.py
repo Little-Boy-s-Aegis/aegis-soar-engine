@@ -85,7 +85,7 @@ class TestFastPathSafety(unittest.TestCase):
         
         data = {
             "source_ip": "198.51.100.55",
-            "attack_type": "SQLi",
+            "attack_type": "Brute Force",
             "recommended_action": "BLOCK_IP",
             "timestamp": "2026-07-09T06:00:00Z"
         }
@@ -96,6 +96,33 @@ class TestFastPathSafety(unittest.TestCase):
         app.fortinet.block_ip.assert_called_once_with("198.51.100.55")
         app.waf.block_ip.assert_called_once_with("198.51.100.55")
         app.executor._call_dashboard_perform_action.assert_called_once()
+
+    def test_fast_path_sqli_alert_only_no_autoban(self):
+        app = SoarEngineApp()
+        app.fortinet = MagicMock()
+        app.waf = MagicMock()
+        app.producer = MagicMock()
+        app.executor = MagicMock()
+        app.policy_evaluator = MagicMock()
+        app.rate_limiter = MagicMock()
+
+        data = {
+            "source_ip": "198.51.100.56",
+            "attack_type": "SQLi",
+            "recommended_action": "block_ip",
+            "payload_snippet": "' OR '1'='1",
+            "timestamp": "2026-07-09T06:00:00Z"
+        }
+
+        app.process_fast_path(data)
+
+        app.fortinet.block_ip.assert_not_called()
+        app.waf.block_ip.assert_not_called()
+        app.executor._call_dashboard_perform_action.assert_not_called()
+        app.producer.send.assert_called_once()
+        payload = app.producer.send.call_args.args[1]
+        self.assertEqual(payload["status"], "DETECTED")
+        self.assertIn("SQL injection detected", payload["description"])
 
 if __name__ == "__main__":
     unittest.main()

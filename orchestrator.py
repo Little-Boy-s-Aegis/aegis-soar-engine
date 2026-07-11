@@ -55,7 +55,7 @@ def _log_value(log, *keys):
 def _entity_lists_from_finding(finding: dict) -> dict:
     entities = finding.get("entities", {}) or {}
     ips = []
-    for key in ("ips", "source_ip", "destination_ip"):
+    for key in ("ips", "source_ip"):
         ips.extend(_as_list(entities.get(key)))
     users = []
     for key in ("users", "username"):
@@ -83,6 +83,15 @@ def _entity_lists_from_finding(finding: dict) -> dict:
     }
 
 
+def is_public_ip(ip_str: str) -> bool:
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(ip_str.strip())
+        return not (ip.is_private or ip.is_loopback or ip.is_unspecified)
+    except Exception:
+        return False
+
+
 def _merge_entity_lists(findings: list[dict], verified_logs: list[dict] | None = None) -> dict:
     merged = {
         "users": [],
@@ -108,7 +117,13 @@ def _merge_entity_lists(findings: list[dict], verified_logs: list[dict] | None =
         if ecs_url:
             merged["api_endpoints"].append(str(ecs_url))
 
-    return {key: list(dict.fromkeys(values)) for key, values in merged.items()}
+    # Prioritize public IPs first in the list
+    unique_ips = list(dict.fromkeys(merged["ips"]))
+    public_ips = [ip for ip in unique_ips if is_public_ip(ip)]
+    private_ips = [ip for ip in unique_ips if not is_public_ip(ip)]
+    merged["ips"] = public_ips + private_ips
+
+    return {key: list(dict.fromkeys(values)) if key != "ips" else merged["ips"] for key, values in merged.items()}
 
 
 def _summarize_findings(findings: list[dict]) -> list[dict]:

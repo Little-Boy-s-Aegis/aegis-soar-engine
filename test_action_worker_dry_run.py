@@ -173,5 +173,54 @@ class TestActionWorkerDryRun(unittest.TestCase):
         # Verify Audit log was called on the dashboard API
         worker.executor._call_dashboard_perform_action.assert_called_once()
 
+    def test_sync_execution_progress_merges_executed_action(self):
+        worker = SoarActionWorker()
+        worker.producer = MagicMock()
+        worker.executor = MagicMock()
+
+        decision = {
+            "timestamp": "2026-07-10T14:00:00Z",
+            "input_summary": {"incident_id": "inc-critical-sqli"},
+            "verified_case": {
+                "title": "Aegis Bank - SQL_INJECTION Detected",
+                "entities": {
+                    "ips": ["42.114.204.232"],
+                    "api_endpoints": ["/login"]
+                }
+            },
+            "decision": {"risk_response_floor": {"performed_actions": []}},
+            "output_and_notification": {
+                "executed_actions": [],
+                "suggested_actions": ["block_ip on 42.114.204.232"]
+            },
+            "actions": [
+                {
+                    "action_id": "act-critical-ban",
+                    "action_type": "block_ip",
+                    "phase": "contain",
+                    "approval_mode": "AUTO",
+                    "status": "ready_for_execution",
+                    "target": {"value_masked": "42.114.204.232"}
+                }
+            ]
+        }
+        action = {
+            "action_id": "act-critical-ban",
+            "action_type": "block_ip",
+            "phase": "contain",
+            "approval_mode": "AUTO",
+            "status": "executed",
+            "target": {"value_masked": "42.114.204.232"},
+            "rationale": "PB-WEB-EDGE block_ip executed."
+        }
+
+        worker.sync_execution_progress(decision, action, "inc-critical-sqli")
+
+        self.assertEqual(decision["actions"][0]["status"], "executed")
+        self.assertIn("block_ip", decision["decision"]["risk_response_floor"]["performed_actions"])
+        self.assertIn("block_ip on 42.114.204.232", decision["output_and_notification"]["executed_actions"])
+        self.assertNotIn("block_ip on 42.114.204.232", decision["output_and_notification"]["suggested_actions"])
+        worker.executor._push_l2_decision_to_gateway.assert_called_once_with(decision)
+
 if __name__ == "__main__":
     unittest.main()

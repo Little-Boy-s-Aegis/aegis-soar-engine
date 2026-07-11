@@ -116,6 +116,11 @@ class SoarActionWorker:
         logger.info(f"Kafka Brokers: {KAFKA_BROKERS}")
         logger.info(f"Execution Delay: {ACTION_EXECUTION_DELAY_SECONDS}s")
 
+        if not KAFKA_BROKERS:
+            logger.warning("KAFKA_BOOTSTRAP_SERVERS is not configured. Action worker is idle; SQS-mode Orchestrator executes actions directly.")
+            while True:
+                time.sleep(60)
+
         # Initialize producer
         for attempt in range(5):
             try:
@@ -253,9 +258,11 @@ class SoarActionWorker:
                 approval_mode = action.get("approval_mode")
                 
                 run_action = False
-                if phase in ("preserve", "hunt", "notify") or approval_mode == "AUTO":
+                if phase in ("preserve", "hunt", "notify"):
                     run_action = True
-                elif phase == "contain" and should_execute_containment:
+                elif phase == "contain" or action_type in ("block_ip", "block_domain", "quarantine_host", "disable_account"):
+                    run_action = approval_mode == "AUTO" and should_execute_containment
+                elif approval_mode == "AUTO":
                     run_action = True
                 
                 is_dry_run = self.dry_run or decision.get("dry_run", False)
@@ -562,6 +569,8 @@ class SoarActionWorker:
     def sync_execution_progress(self, decision: dict, action: dict, incident_id: str):
         """Synchronizes execution status with the Go API Gateway and Dashboard."""
         try:
+            self._merge_action_progress_into_decision(decision, action)
+
             # 1. Publish to aegis.security.events Kafka topic
             event_uuid = str(uuid.uuid4())
             verified_case = decision.get("verified_case", {})
@@ -592,6 +601,65 @@ class SoarActionWorker:
 
         except Exception as e:
             logger.error(f"Failed to sync execution progress: {e}")
+
+    def _merge_action_progress_into_decision(self, decision: dict, action: dict):
+        """Persist the just-executed queue action back into the decision payload.
+
+        Kafka serializes the queued action separately from decision["actions"], so
+        mutating the dequeued action alone does not update the payload pushed to
+        the dashboard gateway. The Go gateway only applies block_ip side effects
+        for actions whose status is "executed".
+        """
+        if not isinstance(decision, dict) or not isinstance(action, dict):
+            return
+
+        action_id = action.get("action_id")
+        action_type = action.get("action_type")
+        target_value = (action.get("target") or {}).get("value_masked")
+
+        actions = decision.setdefault("actions", [])
+        matched = False
+        for idx, existing in enumerate(actions):
+            existing_target = (existing.get("target") or {}).get("value_masked")
+            same_id = action_id and existing.get("action_id") == action_id
+            same_target = (
+                not action_id
+                and existing.get("action_type") == action_type
+                and existing_target == target_value
+            )
+            if same_id or same_target:
+                merged = {**existing, **action}
+                if existing.get("target") or action.get("target"):
+                    merged["target"] = {**(existing.get("target") or {}), **(action.get("target") or {})}
+                actions[idx] = merged
+                matched = True
+                break
+
+        if not matched:
+            actions.append(action)
+
+        output = decision.setdefault("output_and_notification", {})
+        executed = output.setdefault("executed_actions", [])
+        suggested = output.setdefault("suggested_actions", [])
+        action_label = f"{action_type} on {target_value}"
+        if action.get("status") == "executed":
+            if action_label not in executed:
+                executed.append(action_label)
+            if action_label in suggested:
+                suggested.remove(action_label)
+        elif action.get("status") in ("suggested", "ready_for_execution", "queued_for_approval"):
+            if action_label not in suggested:
+                suggested.append(action_label)
+
+        floor = decision.setdefault("decision", {}).setdefault("risk_response_floor", {})
+        if action.get("status") == "executed":
+            performed = floor.setdefault("performed_actions", [])
+            if action_type and action_type not in performed:
+                performed.append(action_type)
+        elif action.get("status") == "failed":
+            blocked = floor.setdefault("blocked_actions", [])
+            if action_type and action_type not in blocked:
+                blocked.append(action_type)
 
     def trigger_p0_alert(self, incident_id: str, action: dict, reason: str, decision: dict):
         """Triggers a P0 Emergency Alert when a critical safety guardrail is violated."""

@@ -37,11 +37,19 @@ def _as_list(value):
     return [str(value)]
 
 
+def _is_sql_injection_text(*parts) -> bool:
+    for part in parts:
+        text = str(part or "").upper()
+        if "SQL_INJECTION" in text or "SQL INJECTION" in text or "SQLI" in text:
+            return True
+    return False
+
+
 def extract_l1_entity_lists(finding: dict) -> dict:
     """Accept both legacy list entities and the new per-agent flat entity keys."""
     entities = finding.get("entities", {}) or {}
     ips = []
-    for key in ("ips", "source_ip", "destination_ip"):
+    for key in ("ips", "source_ip"):
         ips.extend(_as_list(entities.get(key)))
 
     users = []
@@ -132,6 +140,11 @@ class SoarEngineApp:
         action_queue_url = os.getenv("ACTION_QUEUE_URL")
 
         if not action_queue_url:
+            if not KAFKA_BROKERS:
+                logger.warning("KAFKA_BOOTSTRAP_SERVERS is not configured and ACTION_QUEUE_URL is absent; keeping service alive in idle mode.")
+                while True:
+                    time.sleep(60)
+
             # Initialize producer
             for attempt in range(5):
                 try:
@@ -258,11 +271,44 @@ class SoarEngineApp:
         source_ip = data.get("source_ip", "127.0.0.1")
         attack_type = data.get("attack_type", "UNKNOWN")
         recommended_action = data.get("recommended_action", "BLOCK_IP")
+        recommended_action_upper = str(recommended_action).upper()
+        recommended_action_type = str(recommended_action).lower()
+
+        if recommended_action_upper == "BLOCK_IP" and _is_sql_injection_text(attack_type, data.get("payload_snippet")):
+            # Retrieve dynamic autopilot setting
+            autopilot_enabled = SOC_AUTOPILOT_ENABLED
+            try:
+                with self.verifier._get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT value FROM system_settings WHERE key = 'soc_autopilot_enabled'")
+                        row = cursor.fetchone()
+                        if row:
+                            autopilot_enabled = (row[0].strip().lower() == "true")
+            except Exception as dbe:
+                logger.warning(f"Failed to fetch dynamic autopilot setting from PostgreSQL in fast-path: {dbe}")
+
+            if not autopilot_enabled:
+                logger.info("[FAST-PATH ROUTER] SQLi detected from %s; publishing alert without autoban.", source_ip)
+                event_payload = {
+                    "eventId": str(uuid.uuid4()),
+                    "timestamp": data.get("timestamp", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")),
+                    "attackType": f"Fast-Path Alert - {attack_type}",
+                    "endpoint": "/",
+                    "payload": f"SQLi threat pattern detected: {data.get('payload_snippet')}",
+                    "status": "DETECTED",
+                    "clientIp": source_ip,
+                    "description": "SQL injection detected. Automatic IP ban is disabled for SQLi high/medium alerts; analyst confirmation is required.",
+                    "sourceService": f"Fast-Path:{data.get('facility', 'WAF')}"
+                }
+                if self.producer:
+                    self.producer.send(DASHBOARD_EVENTS_TOPIC, event_payload)
+                    self.producer.flush()
+                return
 
         # Prepare action representation
         action = {
             "action_id": f"act-fastpath-{str(uuid.uuid4())[:8]}",
-            "action_type": recommended_action.lower(),
+            "action_type": recommended_action_type,
             "phase": "contain",
             "approval_mode": "AUTO",
             "target": {"value_masked": source_ip},
@@ -286,7 +332,7 @@ class SoarEngineApp:
             return
 
         # 0. Trigger Firewall/WAF blocking directly if connector is active and action is BLOCK_IP
-        if recommended_action == "BLOCK_IP":
+        if recommended_action_upper == "BLOCK_IP":
             if self.fortinet:
                 fw_success, fw_msg = self.fortinet.block_ip(source_ip)
                 logger.info(f"[FAST-PATH] Fortinet block result for {source_ip}: success={fw_success}, msg={fw_msg}")
@@ -298,7 +344,7 @@ class SoarEngineApp:
         # Autopilot is considered ON for fast-path since they are obvious and confirmed at Nginx level
         success, details = self.executor._call_dashboard_perform_action(
             actor="SOAR Fast-Path Bypass",
-            action_type=self.executor._map_action_type(recommended_action.lower()),
+            action_type=self.executor._map_action_type(recommended_action_type),
             target=source_ip,
             message=f"Auto-containment triggered for obvious {attack_type} attack."
         )
@@ -370,6 +416,118 @@ class SoarEngineApp:
             # Offload processing to concurrent thread pool to avoid blocking consumer loop
             self.thread_pool.submit(self.process_correlated_group, key, findings)
 
+    def execute_decision_actions_directly(self, decision: dict):
+        """Executes playbook actions directly in SQS mode (no worker queue)."""
+        incident_id = decision.get("input_summary", {}).get("incident_id", "INC-UNKNOWN")
+        actions = decision.get("actions", [])
+        logger.info(f"[SQS EXECUTION] Executing {len(actions)} action(s) directly for incident {incident_id}")
+        
+        # Determine automation control settings
+        autopilot_active = decision.get("automation_control", {}).get("soc_autopilot_enabled", False)
+        execution_window_ok = decision.get("automation_control", {}).get("execution_window", {}).get("in_window", False)
+        eligible = decision.get("automation_control", {}).get("auto_containment_eligible", False)
+        should_execute_containment = autopilot_active and execution_window_ok and eligible
+        
+        is_dry_run = os.getenv("SOAR_DRY_RUN", "false").lower() == "true" or decision.get("dry_run", False)
+
+        for action in actions:
+            action_type = action.get("action_type")
+            target_value = (action.get("target") or {}).get("value_masked")
+            phase = action.get("phase")
+            approval_mode = action.get("approval_mode")
+            
+            run_action = False
+            if phase in ("preserve", "hunt", "notify"):
+                run_action = True
+            elif phase == "contain" or action_type in ("block_ip", "block_domain", "quarantine_host", "disable_account"):
+                run_action = approval_mode == "AUTO" and should_execute_containment
+            elif approval_mode == "AUTO":
+                run_action = True
+            
+            if not run_action:
+                logger.info(f"[SQS EXECUTION] Skipping action {action_type} on {target_value} (not eligible or requires approval)")
+                action["status"] = "skipped"
+                continue
+
+            # Evaluate safety policies via evaluate_action_safety helper
+            from safety_gate import evaluate_action_safety
+            allowed, reason = evaluate_action_safety(self.policy_evaluator, action, decision)
+            
+            # Log Guardrails Check to Audit Trail
+            from audit_logger import SoarAuditLogger
+            SoarAuditLogger.log_guardrail_check(incident_id, action, allowed, reason)
+            
+            if not allowed:
+                logger.error(f"[SQS SAFETY BLOCKED] Action {action_type} on {target_value} blocked: {reason}")
+                action["status"] = "failed"
+                action["rationale"] = f"{action.get('rationale', '')} | Safety Blocked: {reason}"
+                continue
+
+            if is_dry_run:
+                logger.info(f"[SQS DRY RUN] Simulating {action_type} on {target_value}")
+                action["status"] = "simulated"
+                action["rationale"] = f"{action.get('rationale', '')} | [DRY RUN] Simulated execution successfully."
+                continue
+
+            # Execute the action
+            success = False
+            msg = "Action type not supported in direct execution"
+            
+            if action_type == "block_ip" and target_value:
+                # WAF block
+                if self.waf:
+                    waf_success, waf_msg = self.waf.block_ip(target_value)
+                    logger.info(f"[SQS EXECUTION] AWS WAF block result for {target_value}: success={waf_success}, msg={waf_msg}")
+                    success = waf_success
+                    msg = waf_msg
+                    SoarAuditLogger.log_api_response(incident_id, "aws_waf", "block_ip", {"target": target_value}, waf_success, waf_msg)
+                
+                # Fortinet block
+                if self.fortinet:
+                    fw_success, fw_msg = self.fortinet.block_ip(target_value)
+                    logger.info(f"[SQS EXECUTION] Fortinet block result for {target_value}: success={fw_success}, msg={fw_msg}")
+                    # If WAF succeeded or Fortinet succeeded, we treat it as success
+                    success = success or fw_success
+                    msg = f"{msg} | Fortinet: {fw_msg}"
+                    SoarAuditLogger.log_api_response(incident_id, "fortinet", "block_ip", {"target": target_value}, fw_success, fw_msg)
+
+                # Dashboard block trigger
+                if success:
+                    # Inform dashboard to persist the ban
+                    db_success, db_details = self.executor._call_dashboard_perform_action(
+                        actor="SOAR Direct Executor",
+                        action_type=self.executor._map_action_type(action_type),
+                        target=target_value,
+                        message=f"Auto-containment executed for incident {incident_id}."
+                    )
+                    logger.info(f"[SQS EXECUTION] Dashboard perform action: success={db_success}, details={db_details}")
+                    
+            elif action_type == "notify_soc":
+                # Log to console
+                logger.info(f"[SQS NOTIFY SOC] Incident {incident_id}: {action.get('rationale')}")
+                success = True
+                msg = "SOC notified via logs"
+            else:
+                logger.warning(f"[SQS EXECUTION] Action type {action_type} not implemented in direct execution. Treating as simulated.")
+                success = True
+                msg = "Direct execution simulated"
+
+            action["status"] = "executed" if success else "failed"
+            action["rationale"] = f"{action.get('rationale', '')} | Execution details: {msg}"
+            
+        # Update Redis status
+        if self.redis:
+            redis_key = f"aegis:playbook:status:{incident_id}"
+            self.redis.hset(redis_key, "status", "COMPLETED")
+            self.redis.hset(redis_key, "updated_at", datetime.now(timezone.utc).isoformat())
+
+        # Push decision update back to the Go backend
+        try:
+            self.executor._push_l2_decision_to_gateway(decision)
+            logger.info(f"[SQS EXECUTION] Successfully synchronized execution progress to dashboard for incident {incident_id}")
+        except Exception as se:
+            logger.error(f"[SQS EXECUTION ERROR] Failed to push execution progress: {se}")
+
     def process_correlated_group(self, group_key: str, findings: list):
         """Independent verifications lookup + Qwen invocation + Execution."""
         logger.info(f"[CORRELATOR] Processing group {group_key} containing {len(findings)} finding(s)")
@@ -410,23 +568,26 @@ class SoarEngineApp:
             actions_list = decision.get("actions", [])
             
             if self.redis:
-                redis_key = f"aegis:playbook:status:{incident_id}"
-                actions_status_map = {f"{a.get('action_type')}:{a.get('target', {}).get('value_masked')}": "pending" for a in actions_list}
-                
-                self.redis.hset(redis_key, mapping={
-                    "incident_id": incident_id,
-                    "playbook_id": playbook_id,
-                    "status": "INITIATED",
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "total_actions": len(actions_list),
-                    "executed_actions": 0,
-                    "failed_actions": 0,
-                    "actions_status": json.dumps(actions_status_map)
-                })
-                # Set TTL of 7 days for the state to automatically clean up
-                self.redis.expire(redis_key, 7 * 24 * 3600)
-                logger.info(f"[REDIS STATE] Initialized status for playbook {playbook_id} on incident {incident_id}")
+                try:
+                    redis_key = f"aegis:playbook:status:{incident_id}"
+                    actions_status_map = {f"{a.get('action_type')}:{a.get('target', {}).get('value_masked')}": "pending" for a in actions_list}
+                    
+                    self.redis.hset(redis_key, mapping={
+                        "incident_id": incident_id,
+                        "playbook_id": playbook_id,
+                        "status": "INITIATED",
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "total_actions": len(actions_list),
+                        "executed_actions": 0,
+                        "failed_actions": 0,
+                        "actions_status": json.dumps(actions_status_map)
+                    })
+                    # Set TTL of 7 days for the state to automatically clean up
+                    self.redis.expire(redis_key, 7 * 24 * 3600)
+                    logger.info(f"[REDIS STATE] Initialized status for playbook {playbook_id} on incident {incident_id}")
+                except Exception as re:
+                    logger.warning(f"[REDIS STATE ERROR] Failed to record playbook status in Redis: {re}")
 
             if self.producer:
                 logger.info(f"[ORCHESTRATOR] Publishing L2 Orchestrator Decision to topic {SOAR_DECISIONS_TOPIC}")
@@ -435,6 +596,7 @@ class SoarEngineApp:
                 logger.info(f"[ORCHESTRATOR] Successfully published decision for incident: {decision['input_summary'].get('incident_id')}")
             else:
                 logger.info(f"[ORCHESTRATOR] SQS Mode active. Decision for incident {decision['input_summary'].get('incident_id')} recorded locally.")
+                self.execute_decision_actions_directly(decision)
         except Exception as pe:
             logger.error(f"[ORCHESTRATOR] Failed to record/publish decision: {pe}")
 

@@ -15,7 +15,7 @@
       {
         "step_id": "step-2-risk-gate",
         "type": "if_else",
-        "condition": "risk_score > 6.0",
+        "condition": "risk_score >= 5.0",
         "then_steps": [
           {
             "step_id": "step-3-parallel-containment",
@@ -176,6 +176,90 @@
           }
         ],
         "else_steps": []
+      }
+    ]
+  },
+  "PB-RECON": {
+    "playbook_id": "PB-RECON",
+    "name": "Reconnaissance Activity Playbook",
+    "steps": [
+      {
+        "step_id": "step-1-preserve",
+        "type": "action",
+        "action_type": "preserve_logs",
+        "target": "entities.hosts",
+        "loop": true,
+        "approval_mode": "AUTO",
+        "rationale": "Preserve recon telemetry before blocking."
+      },
+      {
+        "step_id": "step-2-risk-gate",
+        "type": "if_else",
+        "condition": "risk_score >= 5.0",
+        "then_steps": [
+          {
+            "step_id": "step-3-block-ip",
+            "type": "action",
+            "action_type": "block_ip",
+            "target": "entities.ips",
+            "loop": true,
+            "approval_mode": "AUTO",
+            "rationale": "Block attacker IP address participating in active reconnaissance or scanning."
+          }
+        ],
+        "else_steps": [
+          {
+            "step_id": "step-4-notify-soc",
+            "type": "action",
+            "action_type": "notify_soc",
+            "target": "soc_team",
+            "loop": false,
+            "approval_mode": "AUTO",
+            "rationale": "Low risk recon, notify SOC analyst."
+          }
+        ]
+      }
+    ]
+  },
+  "PB-INITIAL-ACCESS": {
+    "playbook_id": "PB-INITIAL-ACCESS",
+    "name": "Initial Access Playbook",
+    "steps": [
+      {
+        "step_id": "step-1-preserve",
+        "type": "action",
+        "action_type": "preserve_logs",
+        "target": "entities.hosts",
+        "loop": true,
+        "approval_mode": "AUTO",
+        "rationale": "Preserve initial access logs before containment."
+      },
+      {
+        "step_id": "step-2-risk-gate",
+        "type": "if_else",
+        "condition": "risk_score >= 5.0",
+        "then_steps": [
+          {
+            "step_id": "step-3-block-ip",
+            "type": "action",
+            "action_type": "block_ip",
+            "target": "entities.ips",
+            "loop": true,
+            "approval_mode": "AUTO",
+            "rationale": "Block attacker IP address after verified initial access exploit attempt."
+          }
+        ],
+        "else_steps": [
+          {
+            "step_id": "step-4-notify-soc",
+            "type": "action",
+            "action_type": "notify_soc",
+            "target": "soc_team",
+            "loop": false,
+            "approval_mode": "AUTO",
+            "rationale": "Low risk initial access attempt, notify SOC analyst."
+          }
+        ]
       }
     ]
   }
