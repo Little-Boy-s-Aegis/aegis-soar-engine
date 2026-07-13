@@ -1,5 +1,7 @@
 # Aegis Bank SOAR Decision Engine (Layer 2)
 
+> **Part of the [Little Boy's Aegis](https://github.com/Little-Boy-s-Aegis) project** -- an end-to-end AI-powered banking security platform.
+
 The **Aegis SOAR (Security Orchestration, Automation, and Response) Decision Engine** serves as the Layer 2 central brain of the Aegis Bank defensive security ecosystem. It sits between the read-only Layer 1 specialist sensor agents (EDR, WAF, UEBA, ATM) and the SOC reporting layer (SOC Dashboard).
 
 The engine ingests security alerts, correlates findings, verifies incidents against database access logs, executes security playbooks, and performs automated containment under strict policy guardrails.
@@ -125,3 +127,21 @@ pytest test_policy_evaluator.py
 # Verify audit trail integrity (FIM)
 pytest test_audit_integrity.py
 ```
+
+---
+
+## Related Repositories
+
+All repositories under the [Little Boy's Aegis](https://github.com/Little-Boy-s-Aegis) organization:
+
+| Repository | Description |
+|---|---|
+| [aegis-bank-deployment](https://github.com/Little-Boy-s-Aegis/aegis-bank-deployment) | Docker Compose orchestration for the full platform |
+| [aegis-bank-backend](https://github.com/Little-Boy-s-Aegis/aegis-bank-backend) | Spring Boot banking API |
+| [aegis-bank-web-client](https://github.com/Little-Boy-s-Aegis/aegis-bank-web-client) | Next.js banking web portal |
+| [aegis-bank-mobile-app](https://github.com/Little-Boy-s-Aegis/aegis-bank-mobile-app) | Flutter mobile banking app |
+| [dashboard](https://github.com/Little-Boy-s-Aegis/dashboard) | SOC Dashboard -- Go backend + React frontend |
+| [agent-layer-1](https://github.com/Little-Boy-s-Aegis/agent-layer-1) | AI Sensor Agents (Layer 1) |
+| [agent-layer-2](https://github.com/Little-Boy-s-Aegis/agent-layer-2) | Meta Analyzer / SOAR Orchestrator prompts |
+| [aegis-staging-sandbox](https://github.com/Little-Boy-s-Aegis/aegis-staging-sandbox) | Staging Sandbox for defensive tool integration |
+| [aegis-bank-terraform](https://github.com/Little-Boy-s-Aegis/aegis-bank-terraform) | Terraform IaC for cloud infrastructure |
