@@ -1,5 +1,10 @@
 # Aegis Bank SOAR Decision Engine (Layer 2)
 
+[![Git Clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Little-Boy-s-Aegis/aegis-bank-deployment/main/clone-badge.json)](https://github.com/Little-Boy-s-Aegis/aegis-bank-deployment)
+[![Unique Cloners](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Little-Boy-s-Aegis/aegis-bank-deployment/main/uniques-badge.json)](https://github.com/Little-Boy-s-Aegis/aegis-bank-deployment)
+[![Release Downloads](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Little-Boy-s-Aegis/aegis-bank-deployment/main/downloads-badge.json)](https://github.com/Little-Boy-s-Aegis/aegis-bank-deployment/releases)
+[![Stars](https://img.shields.io/github/stars/Little-Boy-s-Aegis/aegis-soar-engine?style=flat&color=F59E0B&logo=github&label=stars)](https://github.com/Little-Boy-s-Aegis/aegis-soar-engine/stargazers)
+
 > **Part of the [Little Boy's Aegis](https://github.com/Little-Boy-s-Aegis) project** -- an end-to-end AI-powered banking security platform.
 
 The **Aegis SOAR (Security Orchestration, Automation, and Response) Decision Engine** serves as the Layer 2 central brain of the Aegis Bank defensive security ecosystem. It sits between the read-only Layer 1 specialist sensor agents (EDR, WAF, UEBA, ATM) and the SOC reporting layer (SOC Dashboard).
