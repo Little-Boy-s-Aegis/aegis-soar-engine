@@ -36,7 +36,14 @@ class PlaybookRunner:
         """
         playbook = self.playbooks.get(playbook_id)
         if not playbook:
-            logger.warning(f"Playbook {playbook_id} not found in library.")
+            logger.warning(f"Playbook {playbook_id} not found in library; attempting dynamic fallback mapping.")
+            if any(k in str(playbook_id).upper() for k in ["WEB", "SQL", "BRUTE", "HTTP", "API", "AUTH"]):
+                playbook = self.playbooks.get("PB-WEB-EDGE")
+            else:
+                playbook = self.playbooks.get("PB-INITIAL-ACCESS")
+
+        if not playbook:
+            logger.warning(f"Playbook {playbook_id} not found in library after fallback.")
             return []
 
         logger.info(f"Starting execution of playbook {playbook_id}: '{playbook.get('name')}'")

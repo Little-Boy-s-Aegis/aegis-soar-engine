@@ -18,6 +18,7 @@ from config import (
     LLM_PROVIDER, DASHSCOPE_API_KEY, QWEN_MODEL_NAME, QWEN_BASE_URL,
     BEDROCK_MODEL_ID, BEDROCK_REGION, SYSTEM_PROMPT_PATH, RISK_SCORING_DIR,
     LLM_TIMEOUT_SECONDS, LLM_MAX_TOKENS, LLM_ENABLED,
+    OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL,
     REDIS_URL, SOC_AUTOPILOT_ENABLED, DEFAULT_EXECUTION_WINDOW_START,
     DEFAULT_EXECUTION_WINDOW_END, DEFAULT_TIMEZONE
 )
@@ -388,6 +389,13 @@ class SoarOrchestrator:
                 ),
             )
             logger.info(f"Bedrock Qwen client initialized: {BEDROCK_MODEL_ID} ({BEDROCK_REGION})")
+        elif LLM_ENABLED and self.llm_provider == "openai" and OPENAI_API_KEY:
+            self.client = OpenAI(
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL,
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+            logger.info(f"OpenAI/ChatGPT client initialized: {OPENAI_BASE_URL} (Model: {OPENAI_MODEL})")
         elif LLM_ENABLED and DASHSCOPE_API_KEY:
             self.client = OpenAI(
                 api_key=DASHSCOPE_API_KEY,
@@ -459,11 +467,12 @@ class SoarOrchestrator:
         if self.llm_provider == "bedrock":
             return self._invoke_bedrock_qwen(user_prompt)
 
+        model_name = OPENAI_MODEL if self.llm_provider == "openai" else QWEN_MODEL_NAME
         response = self.client.chat.completions.create(
-            model=QWEN_MODEL_NAME,
+            model=model_name,
             messages=[
                 {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": f"{user_prompt}\n\nReturn only a valid JSON object."},
             ],
             response_format={"type": "json_object"},
             timeout=LLM_TIMEOUT_SECONDS
@@ -686,11 +695,14 @@ Please correlate the findings, verify the logs, look up the base threat scores, 
                 
                 # Resolve actions structurally via PlaybookRunner
                 activated_playbooks = decision_dict.get("playbook_routing", {}).get("activated_playbooks", [])
-                if activated_playbooks:
-                    playbook_id = activated_playbooks[0].get("playbook_id")
-                    logger.info(f"LLM activated playbook: {playbook_id}. Resolving actions structurally via PlaybookRunner...")
-                    structured_actions = self.playbook_runner.execute_playbook(playbook_id, decision_dict)
-                    if structured_actions:
+                playbook_id = activated_playbooks[0].get("playbook_id") if activated_playbooks else "PB-WEB-EDGE"
+                logger.info(f"LLM activated playbook: {playbook_id}. Resolving actions structurally via PlaybookRunner...")
+                structured_actions = self.playbook_runner.execute_playbook(playbook_id, decision_dict)
+                if not structured_actions:
+                    logger.warning(f"Playbook {playbook_id} returned 0 actions; using fallback PB-WEB-EDGE.")
+                    structured_actions = self.playbook_runner.execute_playbook("PB-WEB-EDGE", decision_dict)
+
+                if structured_actions:
                         # Enrich each resolved action with metadata expected by v8 schema
                         for a in structured_actions:
                             a["timestamp"] = a.get("timestamp") or _utc_now()

@@ -53,6 +53,7 @@ def build_action_intent(action: dict, decision: dict) -> dict:
             "environment": os.getenv("AEGIS_ENVIRONMENT", "development"),
             "policy_revision": policy_revision,
             "service_claims": {"subject": os.getenv("OPA_CALLER_ID", "soar-action-worker")},
+            "allow_private_ip_ban": os.getenv("AEGIS_ALLOW_PRIVATE_IP_BAN", "true").lower() == "true",
         },
         "action": {
             "type": str(action.get("action_type") or "").strip().lower(),
